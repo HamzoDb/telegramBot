@@ -12,6 +12,7 @@ from database.repository import (
     get_conn,
     get_all_users_ids,
     update_payment_number_db,
+    set_account_status,
 )
 from services.generators import generate_account_name
 from keyboards.main import back_only_markup
@@ -177,7 +178,10 @@ async def admin_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif action == "regen_do":
         account = get_account_by_id(order["account_id"])
-        new_name = generate_account_name(account["account_name"], user.id)
+        import re
+        match = re.match(r"^MW(.+?)[A-Z]{2}\d{2}$", account["account_name"])
+        base_name = match.group(1) if match else account["account_name"]
+        new_name = generate_account_name(base_name, user.id)
         update_account_name(account["id"], new_name)
         await query.answer("🔄 تم التغيير!")
         current_text = (
@@ -217,6 +221,7 @@ async def admin_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except:
                 pass
         update_order_status(order_code, "completed", processed_by=user.id)
+        set_account_status(account["id"], "فعال ✅")
         await query.answer("✅ تم")
         await safe_edit("✅ تم التنفيذ بنجاح.", None)
 

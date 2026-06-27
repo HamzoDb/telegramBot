@@ -111,6 +111,7 @@ def init_db():
         order_code TEXT
     )"""
     )
+    
 
     _migrate_tables(cur)
 
@@ -139,3 +140,18 @@ def _migrate_tables(cur):
             cur.execute(f"ALTER TABLE {table} ADD COLUMN {col} {type_def}")
         except sqlite3.OperationalError:
             pass
+
+    try:
+        cur.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_unique_transaction_code "
+            "ON orders (transaction_code) "
+            "WHERE transaction_code IS NOT NULL"
+        )
+    except sqlite3.OperationalError:
+        pass
+
+    # حقل لتتبع أي أدمن قفل طلب السحب لمعالجته (منع تعارض الأدمنين)
+    try:
+        cur.execute("ALTER TABLE orders ADD COLUMN locked_by_admin_id INTEGER")
+    except sqlite3.OperationalError:
+        pass

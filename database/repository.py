@@ -1,4 +1,5 @@
 # database/repository.py
+import sqlite3
 from database.db import get_conn
 from datetime import datetime
 
@@ -217,14 +218,19 @@ def create_account_record(user_id, account_name, password):
     conn = get_conn()
     cur = conn.cursor()
     now = datetime.utcnow().isoformat()
-    cur.execute(
-        "INSERT INTO accounts (user_id, account_name, password, status, created_at) VALUES (?, ?, ?, ?, ?)",
-        (user_id, account_name, password, "pending", now),
-    )
-    conn.commit()
-    acc_id = cur.lastrowid
-    conn.close()
-    return get_account_by_id(acc_id)
+    try:
+        cur.execute(
+            "INSERT INTO accounts (user_id, account_name, password, status, created_at) VALUES (?, ?, ?, ?, ?)",
+            (user_id, account_name, password, "pending", now),
+        )
+        conn.commit()
+        acc_id = cur.lastrowid
+        return get_account_by_id(acc_id)
+    except sqlite3.IntegrityError:
+        conn.rollback()
+        return None
+    finally:
+        conn.close()
 
 
 def get_accounts_by_user(user_id):
@@ -295,6 +301,18 @@ def has_pending_deposit(user_id):
     return True if res else False
 
 
+def has_pending_withdraw(user_id):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT 1 FROM orders WHERE user_id=? AND status IN('pending', 'processing') AND service='WALLET_WITHDRAW'",
+        (user_id,),
+    )
+    res = cur.fetchone()
+    conn.close()
+    return True if res else False
+
+
 def is_transaction_used(transaction_code):
     conn = get_conn()
     cur = conn.cursor()
@@ -316,29 +334,34 @@ def create_order(
     conn = get_conn()
     cur = conn.cursor()
     now = datetime.utcnow()
-    timestamp = now.strftime("%Y%m%d%H%M%S")
-    cur.execute(
-        "INSERT INTO orders (order_code, transaction_code, user_id, account_id, service, amount, data, proof_file_id, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (
-            None,
-            transaction_code,
-            user_id,
-            account_id,
-            service,
-            amount,
-            data,
-            proof_file_id,
-            "pending",
-            now.isoformat(),
-            now.isoformat(),
-        ),
-    )
-    oid = cur.lastrowid
-    code = f"REQ-{timestamp}-{oid}"
-    cur.execute("UPDATE orders SET order_code=? WHERE id=?", (code, oid))
-    conn.commit()
-    conn.close()
-    return get_order_by_code(code)
+    timestamp = now.strftime("%Y%m%dT%H%M%S%f")
+    try:
+        cur.execute(
+            "INSERT INTO orders (order_code, transaction_code, user_id, account_id, service, amount, data, proof_file_id, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                None,
+                transaction_code,
+                user_id,
+                account_id,
+                service,
+                amount,
+                data,
+                proof_file_id,
+                "pending",
+                now.isoformat(),
+                now.isoformat(),
+            ),
+        )
+        oid = cur.lastrowid
+        code = f"REQ-{timestamp}-{oid}"
+        cur.execute("UPDATE orders SET order_code=? WHERE id=?", (code, oid))
+        conn.commit()
+        return get_order_by_code(code)
+    except sqlite3.IntegrityError:
+        conn.rollback()
+        return None
+    finally:
+        conn.close()
 
 
 def get_order_by_code(order_code):
@@ -369,6 +392,36 @@ def update_order_status(order_code, status, rejection_reason=None, processed_by=
     params.append(order_code)
 
     cur.execute(sql, tuple(params))
+    conn.commit()
+    conn.close()
+
+
+def lock_order_for_admin(order_code, admin_id):
+    """
+    يحاول قفل طلب السحب لأدمن معيّن، فقط إذا كان لا يزال pending.
+    يُعيد True لو نجح القفل (هذا الأدمن أصبح المسؤول)، False لو سبقه أحد.
+    """
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE orders SET status='processing', locked_by_admin_id=? "
+        "WHERE order_code=? AND status='pending'",
+        (admin_id, order_code),
+    )
+    conn.commit()
+    success = cur.rowcount > 0
+    conn.close()
+    return success
+
+
+def unlock_order(order_code):
+    """يعيد الطلب إلى pending (احتياطي للتراجع لاحقاً)"""
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE orders SET status='pending', locked_by_admin_id=NULL WHERE order_code=?",
+        (order_code,),
+    )
     conn.commit()
     conn.close()
 
@@ -426,14 +479,22 @@ def delete_user_account_permanently(user_id, account_id):
 def update_user_wallet_balance(user_id, amount):
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("SELECT wallet_balance FROM users WHERE id=?", (user_id,))
-    res = cur.fetchone()
-    current_balance = res["wallet_balance"] if res else 0.0
-    new_balance = current_balance + amount
-    cur.execute("UPDATE users SET wallet_balance=? WHERE id=?", (new_balance, user_id))
-    conn.commit()
-    conn.close()
-    return new_balance
+    try:
+        cur.execute(
+            "UPDATE users SET wallet_balance = wallet_balance + ? WHERE id=?",
+            (amount, user_id)
+        )
+        conn.commit()
+        cur.execute("SELECT wallet_balance FROM users WHERE id=?", (user_id,))
+        res = cur.fetchone()
+        return res["wallet_balance"] if res else 0.0
+    except Exception as e:
+        conn.rollback()
+        import logging
+        logging.getLogger(__name__).error(f"فشل تحديث رصيد المستخدم {user_id}: {e}")
+        return None
+    finally:
+        conn.close()
 
 
 def seed_payment_methods():

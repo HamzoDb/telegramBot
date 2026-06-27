@@ -103,10 +103,17 @@ async def account_manager_handler(update, context):
         status_msg = await update.message.reply_text(ANIMATION_STEP_1)
 
         try:
-            final_account_name = generate_account_name(
-                context.user_data.get("account_base"), user.id
-            )
-            account = create_account_record(user_row["id"], final_account_name, text)
+            base_name = context.user_data.get("account_base")
+            account = None
+            max_attempts = 5
+            for attempt in range(max_attempts):
+                final_account_name = generate_account_name(base_name, user.id)
+                account = create_account_record(user_row["id"], final_account_name, text)
+                if account is not None:
+                    break
+
+            if account is None:
+                raise Exception(f"فشل توليد اسم حساب فريد بعد {max_attempts} محاولات")
 
             order = create_order(
                 user_row["id"], "create", account_id=account["id"], data="إنشاء حساب"

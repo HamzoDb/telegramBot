@@ -1,0 +1,2609 @@
+
+
+# ==========================================
+# FILE: .\bot.py
+# ==========================================
+
+# bot.py
+import logging
+from telegram import BotCommand, Update
+from telegram.ext import (
+    ApplicationBuilder,
+    CallbackQueryHandler,
+    ConversationHandler,
+    MessageHandler,
+    CommandHandler,
+    ContextTypes,
+    filters,
+    TypeHandler,  # نحتاجه للتتبع
+)
+from config import TOKEN
+from database.db import init_db
+from database.repository import seed_payment_methods
+
+# استيراد الـ Handlers
+from handlers.start import start, register_start_handlers
+from handlers.wallet import (
+    start_deposit,
+    receive_amount,
+    receive_transaction_code,
+    cancel_deposit,
+    select_payment_method,
+    admin_deposit_decision,
+    WAIT_AMOUNT,
+    WAIT_CODE,
+)
+from handlers.main_menu import register_main_menu_handlers
+from handlers.account import register_account_handlers
+from handlers.deposit_withdraw import register_deposit_withdraw_handlers
+from handlers.admin import register_admin_handlers
+from handlers.navigation import register_navigation_handlers, nav_handler
+
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    logger.error(msg="Exception while handling an update:", exc_info=context.error)
+
+
+# --- دالة التتبع الجديدة ---
+async def debug_sniffer(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """تطبع أي زر يتم ضغطه في التيرمنال للتأكد من وصوله"""
+    if update.callback_query:
+        print(f"🕵️ DEBUG: Button Clicked -> {update.callback_query.data}")
+
+
+async def post_init(application):
+    await application.bot.set_my_commands([BotCommand("start", "القائمة الرئيسية 🏠")])
+
+
+def main():
+    init_db()
+    seed_payment_methods()
+
+    app = ApplicationBuilder().token(TOKEN).post_init(post_init).build()
+    app.add_error_handler(error_handler)
+
+    # 1. إضافة متتبع الأزرار (أول شيء ليرى كل شيء)
+    app.add_handler(TypeHandler(Update, debug_sniffer), group=-1)
+
+    # 2. نظام الإيداع (الأولوية القصوى)
+    deposit_conv = ConversationHandler(
+        entry_points=[
+            # استخدمنا تعبير نمطي بسيط جداً لضمان التقاط الزر
+            CallbackQueryHandler(start_deposit, pattern=r"^dep\|start")
+        ],
+        states={
+            WAIT_AMOUNT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_amount)
+            ],
+            WAIT_CODE: [
+
+                CallbackQueryHandler(
+                    select_payment_method, pattern=r"^pay\|"
+                    ),
+                MessageHandler(
+                    filters.TEXT & ~filters.COMMAND, receive_transaction_code
+                )
+            ],
+        },
+        fallbacks=[
+            CallbackQueryHandler(nav_handler, pattern=r"^nav\|home$"),
+            CommandHandler("start", start),
+        ],
+        allow_reentry=True,
+    )
+    app.add_handler(deposit_conv)
+
+    # 3. بقية الهاندلرز
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CallbackQueryHandler(select_payment_method, pattern=r"^pay\|"))
+    app.add_handler(CallbackQueryHandler(admin_deposit_decision, pattern=r"^dep_adm\|"))
+
+    register_main_menu_handlers(app)
+    register_account_handlers(app)
+    register_deposit_withdraw_handlers(app)
+    register_admin_handlers(app)
+    register_navigation_handlers(app)
+    register_start_handlers(app)
+
+    print(
+        "🚀 البوت يعمل في وضع التصحيح (Debug Mode)... جرب زر الإيداع الآن وراقب التيرمنال."
+    )
+    app.run_polling()
+
+
+if __name__ == "__main__":
+    main()
+
+# ==========================================
+# FILE: .\config.py
+# ==========================================
+
+# config.py
+from dotenv import load_dotenv
+import os
+
+load_dotenv()
+
+TOKEN = os.getenv("BOT_TOKEN")
+if not TOKEN:
+    raise RuntimeError("BOT_TOKEN is missing. Check your .env file")
+
+MIN_DEPOSIT_AMOUNT = 25000
+
+# المجموعات الإدارية
+ADMIN_GROUP_ID = int(os.getenv("ADMIN_GROUP_ID") or -1001234567890)
+DEPOSITS_GROUP_ID = int(
+    os.getenv("DEPOSITS_GROUP_ID") or -1001234567890
+)  # مجموعة الإيداعات
+WITHDRAWS_GROUP_ID = int(os.getenv("WITHDRAWS_GROUP_ID") or -1001234567890)
+
+# قنوات التوثيق والأرشيف (الجديدة)
+ACCEPTED_LOG_CHANNEL_ID = int(
+    os.getenv("ACCEPTED_LOG_CHANNEL_ID") or 0
+)  # قناة الطلبات المقبولة
+REJECTED_LOG_CHANNEL_ID = int(
+    os.getenv("REJECTED_LOG_CHANNEL_ID") or 0
+)  # قناة الطلبات المرفوضة
+USER_ARCHIVE_CHANNEL_ID = int(
+    os.getenv("USER_ARCHIVE_CHANNEL_ID") or 0
+)  # قناة أرشيف المستخدمين
+
+# ADMIN_IDS: comma separated list of integer telegram IDs
+ADMIN_IDS = [
+    int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip().isdigit()
+]
+DB_PATH = os.getenv("DB_PATH") or "bot_database.db"
+
+# Generation constants
+ACCOUNT_PREFIX = os.getenv("ACCOUNT_PREFIX") or "fx_"
+ACCOUNT_SUFFIX = os.getenv("ACCOUNT_SUFFIX") or "_h"
+ORDER_PREFIX = os.getenv("ORDER_PREFIX") or "REQ-"
+
+
+# ==========================================
+# FILE: .\strings.py
+# ==========================================
+
+# strings.py
+
+# --- نصوص المستخدم ---
+MSG_WELCOME = "أهلاً بك 👋\nاختر الخدمة المطلوبة:"
+MSG_ASK_BASE = "✏️ اكتب كلمة أساسية لاسم الحساب (باللغة الإنجليزية، بدون أرقام):"
+MSG_ASK_PASS = "🔐 ممتاز، أرسل الآن كلمة المرور التي تريدها للحساب:"
+MSG_ERR_NUMBERS = "⚠️ الكلمة لا يجب أن تحتوي أرقاماً، حاول مرة أخرى."
+MSG_ERR_GENERAL = "❌ حدث خطأ، يرجى البدء من جديد."
+
+# --- مراحل المعالجة (Animation) ---
+# جعلتها 3 ثواني لكل مرحلة (7 ثواني طويلة جداً وتُشعر المستخدم بالملل)
+ANIMATION_STEP_1 = "⏳ جاري التحقق من توفر الاسم..."
+ANIMATION_STEP_2 = "⚙️ جاري تكوين بيانات الحساب..."
+ANIMATION_STEP_3 = "🔐 جاري تشفير وحفظ كلمة المرور..."
+ANIMATION_STEP_4 = "🔄 جاري رفع الطلب للمشرفين..."
+MSG_SUCCESS_USER = "✅ **تم استلام طلبك!**\n\nالطلب الآن قيد المراجعة من قبل الإدارة، سيصلك إشعار فور تفعيل الحساب."
+
+# --- نصوص المشرفين (Admin) ---
+ADMIN_NEW_ORDER_TITLE = "🔔 <b>طلب إنشاء حساب جديد</b>"
+ADMIN_BTN_CLAIM = "✋ استلام الطلب (Claim)"
+ADMIN_BTN_CONFIRM = "✅ تم التنفيذ (Done)"
+ADMIN_BTN_REJECT = "❌ رفض الطلب"
+
+# نص شرح الأزرار
+ADMIN_HELP_TEXT = """
+👮‍♂️ <b>دليل أزرار التحكم للمشرفين:</b>
+
+1️⃣ <b>استلام الطلب (Claim):</b>
+اضغط عليه لتخبر باقي المشرفين أنك "استلمت" هذا الطلب وتعمل عليه حالياً (حتى لا يحدث تضارب ويعمل مشرفان على نفس الطلب).
+
+2️⃣ <b>تم التنفيذ (Done):</b>
+اضغط عليه بعد أن تنتهي فعلياً من إنشاء الحساب في المنصة. سيتم إرسال رسالة للمستخدم أن حسابه جاهز.
+
+3️⃣ <b>رفض الطلب (Reject):</b>
+في حال كان الطلب مخالفاً أو البيانات غير صحيحة.
+
+⚠️ <b>ملاحظة:</b> الأزرار تعمل فقط للمشرفين المسجلين في النظام.
+"""
+
+BTN_MAIN_MENU = "🏠 القائمة الرئيسية"
+BTN_BACK = "🔙 عودة"
+
+# strings.py additions
+MSG_FLOOD_WARN = "✋ مهلاً! لا تضغط بسرعة كبيرة."
+MSG_ONE_ACCOUNT_RULE = "⚠️ عذراً، يُسمح بإنشاء حساب واحد فقط لكل مستخدم."
+MSG_DELETE_USED = "⚠️ لقد استهلكت فرصتك الوحيدة لحذف الحساب. لا يمكن حذفه مجدداً."
+MSG_ACCOUNT_DELETED = (
+    "✅ تم حذف حسابك بنجاح. يمكنك الآن إنشاء حساب جديد (هذه فرصتك الأخيرة)."
+)
+MSG_CONFIRM_DELETE = "⚠️ هل أنت متأكد من حذف الحساب؟\nهذه العملية لا يمكن التراجع عنها، وتملك فرصة واحدة فقط للحذف !"
+
+# --- Wallet Strings ---
+MSG_DEPOSIT_ASK_AMOUNT = "💰 **شحن المحفظة**\n\nالرجاء كتابة المبلغ الذي تريد إيداعه (بالليرة السورية).\n⚠️ الحد الأدنى: 25,000 ل.س"
+MSG_ERR_AMOUNT_FORMAT = "❌ الرقم غير صحيح. الرجاء كتابة أرقام فقط (مثال: 50000)."
+MSG_ERR_MIN_AMOUNT = "⚠️ المبلغ أقل من الحد المسموح (25,000). حاول مرة أخرى."
+MSG_SELECT_PAYMENT = "💳 المبلغ المطلوب: {amount} SYP\n\nاختر وسيلة الدفع المناسبة لك:"
+MSG_PAY_INSTRUCTIONS = (
+    "📥 **تعليمات الدفع ({method_name})**\n\n"
+    "يرجى تحويل مبلغ وقدره: <b>{amount}</b> \n"
+    "إلى الرقم التالي:\n"
+    "<code>{phone}</code>\n\n"
+    "📸 <b>بعد التحويل، أرسل صورة الإيصال (Screenshot) هنا فوراً.</b>"
+)
+MSG_RECEIPT_RECEIVED = "✅ **تم استلام الإيصال!**\nجاري مراجعته من قبل الإدارة، سيصلك إشعار فور إضافة الرصيد."
+MSG_DEPOSIT_APPROVED = "🎉 **تم شحن رصيدك بنجاح!**\n\nالقيمة المضافة: {amount} SYP\nرصيدك الحالي: {new_balance} SYP"
+MSG_DEPOSIT_REJECTED = "❌ **عذراً، تم رفض طلب الإيداع.**\nالسبب: البيانات غير مطابقة أو الإيصال غير واضح."
+
+# --- أسباب الرفض (الإيداع) ---
+MSG_REJECT_MISMATCH = "المبلغ المحول غير مطابق للمبلغ المسجل في الطلب."
+MSG_REJECT_WRONG_CODE = "كود العملية المرسل غير صحيح أو غير مكتمل."
+MSG_REJECT_NOT_RECEIVED = "لم يصلنا أي إشعار بتحويل بهذا الكود حتى الآن."
+
+# --- قالب رسالة الرفض للمستخدم ---
+MSG_REJECT_NOTIFY = (
+    "❌ <b>نعتذر منك، تم رفض طلب الإيداع (#{order_code})</b>\n\n"
+    "📝 <b>السبب:</b> {reason}\n"
+    "💡 يرجى التأكد من بيانات التحويل وإعادة المحاولة بطلب جديد."
+)
+
+
+# ==========================================
+# FILE: .\database\db.py
+# ==========================================
+
+# database/db.py
+import sqlite3
+from config import DB_PATH
+import logging
+
+
+def get_conn():
+    conn = sqlite3.connect(DB_PATH, timeout=30)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def init_db():
+    conn = get_conn()
+    cur = conn.cursor()
+
+    # 1. جدول المستخدمين (تمت إضافة إحصائيات التقييم ورابط الأرشيف)
+    cur.execute(
+        """
+    CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        telegram_id INTEGER UNIQUE,
+        first_name TEXT,
+        username TEXT,
+        created_at TEXT,
+        state TEXT,
+        last_active TEXT,
+        wallet_balance REAL DEFAULT 0.0,
+        can_delete INTEGER DEFAULT 1,
+        is_blocked INTEGER DEFAULT 0,
+        ban_expires_at TEXT,
+        admin_notes TEXT,
+        
+        -- أعمدة التقييم الجديدة
+        total_successful_orders INTEGER DEFAULT 0,
+        total_rejected_orders INTEGER DEFAULT 0,
+        total_incomplete_orders INTEGER DEFAULT 0,
+        total_deposit_amount REAL DEFAULT 0.0,
+        total_withdraw_amount REAL DEFAULT 0.0,
+        archive_message_id INTEGER DEFAULT NULL -- لحفظ معرف رسالة البطاقة في قناة الأرشيف
+    )"""
+    )
+
+    # 2. جدول إعدادات الدفع
+    cur.execute(
+        """
+    CREATE TABLE IF NOT EXISTS payment_settings (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        method_name TEXT UNIQUE,
+        phone_number TEXT,
+        currency TEXT,
+        is_active INTEGER DEFAULT 1
+    )"""
+    )
+
+    # 3. جدول الحسابات
+    cur.execute(
+        """
+    CREATE TABLE IF NOT EXISTS accounts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER,
+        account_name TEXT UNIQUE,
+        display_name TEXT,
+        password TEXT,
+        status TEXT,
+        created_at TEXT,
+        balance REAL DEFAULT 0.0
+    )"""
+    )
+
+    # 4. جدول الطلبات
+    cur.execute(
+        """
+    CREATE TABLE IF NOT EXISTS orders (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        order_code TEXT UNIQUE,
+        transaction_code TEXT,
+        user_id INTEGER,
+        account_id INTEGER,
+        service TEXT,
+        amount REAL,
+        actual_amount REAL,
+        data TEXT,
+        proof_file_id TEXT,
+        status TEXT,
+        rejection_reason TEXT,
+        processed_by_admin_id INTEGER,
+        created_at TEXT,
+        updated_at TEXT
+    )"""
+    )
+
+    # 5. جدول إجراءات الإدمن
+    cur.execute(
+        """
+    CREATE TABLE IF NOT EXISTS admin_actions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        order_code TEXT,
+        admin_telegram_id INTEGER,
+        action TEXT,
+        note TEXT,
+        timestamp TEXT
+    )"""
+    )
+
+    # 6. جدول خرائط الرسائل
+    cur.execute(
+        """
+    CREATE TABLE IF NOT EXISTS group_map (
+        group_message_id INTEGER PRIMARY KEY,
+        order_code TEXT
+    )"""
+    )
+
+    _migrate_tables(cur)
+
+    conn.commit()
+    conn.close()
+
+
+def _migrate_tables(cur):
+    """تحديث الجداول القديمة بالأعمدة الجديدة"""
+    columns_to_add = [
+        ("users", "is_blocked", "INTEGER DEFAULT 0"),
+        ("users", "ban_expires_at", "TEXT"),
+        ("users", "total_successful_orders", "INTEGER DEFAULT 0"),
+        ("users", "total_rejected_orders", "INTEGER DEFAULT 0"),
+        ("users", "total_incomplete_orders", "INTEGER DEFAULT 0"),
+        ("users", "total_deposit_amount", "REAL DEFAULT 0.0"),
+        ("users", "total_withdraw_amount", "REAL DEFAULT 0.0"),
+        ("users", "archive_message_id", "INTEGER DEFAULT NULL"),
+        ("orders", "actual_amount", "REAL"),
+        ("orders", "rejection_reason", "TEXT"),
+        ("orders", "processed_by_admin_id", "INTEGER"),
+    ]
+
+    for table, col, type_def in columns_to_add:
+        try:
+            cur.execute(f"ALTER TABLE {table} ADD COLUMN {col} {type_def}")
+        except sqlite3.OperationalError:
+            pass
+
+
+# ==========================================
+# FILE: .\database\repository.py
+# ==========================================
+
+# database/repository.py
+from database.db import get_conn
+from datetime import datetime
+
+
+# --- Users Basic ---
+def get_user_by_telegram(telegram_id):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM users WHERE telegram_id=?", (telegram_id,))
+    row = cur.fetchone()
+    conn.close()
+    return row
+
+
+def create_user(telegram_user):
+    conn = get_conn()
+    cur = conn.cursor()
+    now = datetime.utcnow().isoformat()
+    cur.execute(
+        "INSERT INTO users (telegram_id, first_name, username, created_at, state, last_active, wallet_balance, can_delete) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            telegram_user.id,
+            telegram_user.first_name or "",
+            telegram_user.username or "",
+            now,
+            "START",
+            now,
+            0.0,
+            1,
+        ),
+    )
+    conn.commit()
+    user_id = cur.lastrowid
+    conn.close()
+    return user_id
+
+
+def ensure_user(telegram_user):
+    row = get_user_by_telegram(telegram_user.id)
+    if row:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE users SET first_name=?, username=?, last_active=? WHERE telegram_id=?",
+            (
+                telegram_user.first_name or "",
+                telegram_user.username or "",
+                datetime.utcnow().isoformat(),
+                telegram_user.id,
+            ),
+        )
+        conn.commit()
+        conn.close()
+        return row
+    else:
+        create_user(telegram_user)
+        return get_user_by_telegram(telegram_user.id)
+
+
+def set_user_state(telegram_id, state):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE users SET state=?, last_active=? WHERE telegram_id=?",
+        (state, datetime.utcnow().isoformat(), telegram_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_all_users_ids():
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT telegram_id FROM users")
+    rows = cur.fetchall()
+    conn.close()
+    return [row["telegram_id"] for row in rows]
+
+
+# --- Stats & Scoring Updates (New) ---
+def update_user_stats_after_transaction(user_id, amount, is_deposit, is_success):
+    """
+    تحديث الإحصائيات:
+    1. زيادة العداد المناسب (نجاح/فشل).
+    2. خصم 1 من العمليات غير المكتملة لأن العملية انتهت.
+    """
+    conn = get_conn()
+    cur = conn.cursor()
+
+    # أولاً: خصم العملية من "غير المكتملة" لأنها انتهت بقرار (سواء قبول أو رفض)
+    cur.execute(
+        "UPDATE users SET total_incomplete_orders = MAX(0, total_incomplete_orders - 1) WHERE id=?",
+        (user_id,),
+    )
+
+    if is_success:
+        # عملية ناجحة
+        col_amount = "total_deposit_amount" if is_deposit else "total_withdraw_amount"
+        cur.execute(
+            f"UPDATE users SET total_successful_orders = total_successful_orders + 1, {col_amount} = {col_amount} + ? WHERE id=?",
+            (amount, user_id),
+        )
+    else:
+        # عملية مرفوضة
+        cur.execute(
+            "UPDATE users SET total_rejected_orders = total_rejected_orders + 1 WHERE id=?",
+            (user_id,),
+        )
+
+    conn.commit()
+    conn.close()
+
+
+def increment_incomplete_orders(user_id):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE users SET total_incomplete_orders = total_incomplete_orders + 1 WHERE id=?",
+        (user_id,),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_user_archive_id(user_id):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT archive_message_id FROM users WHERE id=?", (user_id,))
+    res = cur.fetchone()
+    conn.close()
+    return res["archive_message_id"] if res else None
+
+
+def set_user_archive_id(user_id, message_id):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE users SET archive_message_id=? WHERE id=?", (message_id, user_id)
+    )
+    conn.commit()
+    conn.close()
+
+
+# --- Ban System ---
+def ban_user(telegram_id, duration_date=None):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE users SET is_blocked=1, ban_expires_at=? WHERE telegram_id=?",
+        (duration_date, telegram_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def unban_user(telegram_id):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE users SET is_blocked=0, ban_expires_at=NULL WHERE telegram_id=?",
+        (telegram_id,),
+    )
+    conn.commit()
+    conn.close()
+
+
+def check_user_ban_status(telegram_id):
+    user = get_user_by_telegram(telegram_id)
+    if not user:
+        return False, None
+
+    if user["is_blocked"]:
+        if user["ban_expires_at"]:
+            expires = datetime.fromisoformat(user["ban_expires_at"])
+            if datetime.utcnow() > expires:
+                unban_user(telegram_id)
+                return False, None
+            else:
+                return True, f"🚫 أنت محظور مؤقتاً حتى: {user['ban_expires_at']}"
+        else:
+            return True, "🚫 تم حظر حسابك نهائياً."
+    return False, None
+
+
+# --- Payment Settings ---
+def update_payment_number_db(method_name, new_number):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE payment_settings SET phone_number=? WHERE method_name=?",
+        (new_number, method_name),
+    )
+    if cur.rowcount == 0:
+        cur.execute(
+            "INSERT INTO payment_settings (method_name, phone_number, currency) VALUES (?, ?, ?)",
+            (method_name, new_number, "SYP"),
+        )
+    conn.commit()
+    conn.close()
+
+
+def get_payment_numbers():
+    """تجلب جميع الأرقام وتضعها في قاموس"""
+    conn = get_conn()
+    cur = conn.cursor()
+    # تأكد من اسم الجدول (هل هو payment_settings أم payment_methods؟)
+    # سأفترض أنه payment_settings بناءً على كودك الأخير
+    cur.execute("SELECT method_name, phone_number FROM payment_settings")
+    rows = cur.fetchall()
+    conn.close()
+    return {row['method_name']: row['phone_number'] for row in rows}
+
+
+# --- Accounts ---
+def create_account_record(user_id, account_name, password):
+    conn = get_conn()
+    cur = conn.cursor()
+    now = datetime.utcnow().isoformat()
+    cur.execute(
+        "INSERT INTO accounts (user_id, account_name, password, status, created_at) VALUES (?, ?, ?, ?, ?)",
+        (user_id, account_name, password, "pending", now),
+    )
+    conn.commit()
+    acc_id = cur.lastrowid
+    conn.close()
+    return get_account_by_id(acc_id)
+
+
+def get_accounts_by_user(user_id):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM accounts WHERE user_id=?", (user_id,))
+    rows = cur.fetchall()
+    conn.close()
+    return rows
+
+
+def get_account_by_id(account_id):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM accounts WHERE id=?", (account_id,))
+    row = cur.fetchone()
+    conn.close()
+    return row
+
+
+def get_account(account_id):
+    return get_account_by_id(account_id)
+
+
+def update_account_balance(account_id, new_balance):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("UPDATE accounts SET balance=? WHERE id=?", (new_balance, account_id))
+    conn.commit()
+    conn.close()
+
+
+def set_account_status(account_id, status):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("UPDATE accounts SET status=? WHERE id=?", (status, account_id))
+    conn.commit()
+    conn.close()
+
+
+def update_account_name(account_id, new_name):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("UPDATE accounts SET account_name=? WHERE id=?", (new_name, account_id))
+    conn.commit()
+    conn.close()
+
+
+def count_user_accounts(user_id):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM accounts WHERE user_id=?", (user_id,))
+    count = cur.fetchone()[0]
+    conn.close()
+    return count
+
+
+# --- Orders & Security ---
+def has_pending_deposit(user_id):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT 1 FROM orders WHERE user_id=? AND status='pending' AND service='WALLET_DEPOSIT'",
+        (user_id,),
+    )
+    res = cur.fetchone()
+    conn.close()
+    return True if res else False
+
+
+def is_transaction_used(transaction_code):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT 1 FROM orders WHERE transaction_code=?", (transaction_code,))
+    res = cur.fetchone()
+    conn.close()
+    return True if res else False
+
+
+def create_order(
+    user_id,
+    service,
+    account_id=None,
+    amount=None,
+    data=None,
+    proof_file_id=None,
+    transaction_code=None,
+):
+    conn = get_conn()
+    cur = conn.cursor()
+    now = datetime.utcnow()
+    timestamp = now.strftime("%Y%m%d%H%M%S")
+    cur.execute(
+        "INSERT INTO orders (order_code, transaction_code, user_id, account_id, service, amount, data, proof_file_id, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            None,
+            transaction_code,
+            user_id,
+            account_id,
+            service,
+            amount,
+            data,
+            proof_file_id,
+            "pending",
+            now.isoformat(),
+            now.isoformat(),
+        ),
+    )
+    oid = cur.lastrowid
+    code = f"REQ-{timestamp}-{oid}"
+    cur.execute("UPDATE orders SET order_code=? WHERE id=?", (code, oid))
+    conn.commit()
+    conn.close()
+    return get_order_by_code(code)
+
+
+def get_order_by_code(order_code):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM orders WHERE order_code=?", (order_code,))
+    row = cur.fetchone()
+    conn.close()
+    return row
+
+
+def update_order_status(order_code, status, rejection_reason=None, processed_by=None):
+    conn = get_conn()
+    cur = conn.cursor()
+
+    sql = "UPDATE orders SET status=?, updated_at=?"
+    params = [status, datetime.utcnow().isoformat()]
+
+    if rejection_reason:
+        sql += ", rejection_reason=?"
+        params.append(rejection_reason)
+
+    if processed_by:
+        sql += ", processed_by_admin_id=?"
+        params.append(processed_by)
+
+    sql += " WHERE order_code=?"
+    params.append(order_code)
+
+    cur.execute(sql, tuple(params))
+    conn.commit()
+    conn.close()
+
+
+# --- Helpers ---
+def map_group_message(group_message_id, order_code):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT OR REPLACE INTO group_map (group_message_id, order_code) VALUES (?, ?)",
+        (group_message_id, order_code),
+    )
+    conn.commit()
+    conn.close()
+
+
+def find_order_code_by_group_message(group_message_id):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT order_code FROM group_map WHERE group_message_id=?", (group_message_id,)
+    )
+    row = cur.fetchone()
+    conn.close()
+    return row["order_code"] if row else None
+
+
+# --- Wallet & Deletion ---
+def get_user_delete_permission(user_id):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT can_delete FROM users WHERE id=?", (user_id,))
+    res = cur.fetchone()
+    conn.close()
+    return res["can_delete"] if res else 0
+
+
+def delete_user_account_permanently(user_id, account_id):
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "DELETE FROM accounts WHERE id=? AND user_id=?", (account_id, user_id)
+        )
+        cur.execute("UPDATE users SET can_delete=0 WHERE id=?", (user_id,))
+        conn.commit()
+        return True
+    except:
+        conn.rollback()
+        return False
+    finally:
+        conn.close()
+
+
+def update_user_wallet_balance(user_id, amount):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT wallet_balance FROM users WHERE id=?", (user_id,))
+    res = cur.fetchone()
+    current_balance = res["wallet_balance"] if res else 0.0
+    new_balance = current_balance + amount
+    cur.execute("UPDATE users SET wallet_balance=? WHERE id=?", (new_balance, user_id))
+    conn.commit()
+    conn.close()
+    return new_balance
+
+
+def seed_payment_methods():
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT count(*) FROM payment_settings")
+    if cur.fetchone()[0] == 0:
+        cur.execute(
+            "INSERT INTO payment_settings (method_name, phone_number, currency) VALUES (?, ?, ?)",
+            ("syriatel", "0930000000", "SYP"),
+        )
+        cur.execute(
+            "INSERT INTO payment_settings (method_name, phone_number, currency) VALUES (?, ?, ?)",
+            ("sham", "0990000000", "SYP"),
+        )
+        conn.commit()
+    conn.close()
+
+
+def get_user_by_id_helper(db_id):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM users WHERE id=?", (db_id,))
+    res = cur.fetchone()
+    conn.close()
+    return res
+
+
+def get_bot_account_name(user_id):
+    """جلب اسم حساب المستخدم من جدول accounts"""
+    conn = get_conn()
+    cur = conn.cursor()
+
+    cur.execute("SELECT account_name From accounts WHERE user_id=? LIMIT 1", (user_id,))
+    res = cur.fetchone()
+    return res["account_name"] if res else None
+
+# ==========================================
+# FILE: .\database\__init__.py
+# ==========================================
+
+
+
+# ==========================================
+# FILE: .\handlers\account.py
+# ==========================================
+
+# handlers/account.py
+import asyncio
+import re
+import logging
+from telegram.ext import MessageHandler, filters
+from telegram.constants import ParseMode
+from strings import *
+from database.repository import (
+    get_user_by_telegram,
+    create_account_record,
+    create_order,
+    set_user_state,
+)
+from keyboards.main import back_nav_markup, back_only_markup, main_menu_keyboard
+from services.notifications import post_order_to_admin_group
+from services.generators import generate_account_name
+from services.scoring import update_live_card
+from handlers.navigation import add_to_stack, clear_stack
+from config import ADMIN_IDS
+
+
+async def account_manager_handler(update, context):
+    if update.message:
+        await add_to_stack(context, update.message.message_id)
+    user = update.effective_user
+    chat_id = update.effective_chat.id
+    user_msg_id = update.message.message_id
+    user_row = get_user_by_telegram(user.id)
+
+    if not user_row:
+        return
+    state = user_row["state"]
+    text = update.message.text.strip()
+
+    # دالة حذف الرسائل الأصلية التي كانت لديك لضمان نظافة الشات
+    async def delete_msg(m_id):
+        try:
+            await context.bot.delete_message(chat_id, m_id)
+        except Exception:
+            pass
+
+    # --- مرحلة 1: استلام الاسم ---
+    if state == "CREATING_USERNAME":
+        await delete_msg(user_msg_id)
+        if not re.match(r"^[a-zA-Z]+$", text):
+            msg = await update.message.reply_text(
+                "⚠️ يرجى كتابة الاسم بالأحرف الإنجليزية فقط.",
+                reply_markup=back_only_markup(),
+            )
+            await add_to_stack(context, msg.message_id)
+            return
+
+        # إذا نجح الاسم: نعدل الرسالة السابقة ونطلب الباسورد
+        context.user_data["account_base"] = text
+        last_msg_id = context.user_data.get("last_msg_id")
+        if last_msg_id:
+            try:
+                # نستخدم edit_message_text لتغيير النص وحذف الأزرار
+                await context.bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=last_msg_id,
+                    text=f"✅ تم استلام الاسم: <b>{text}</b>",
+                    parse_mode="HTML",
+                    reply_markup=None,  # حذف الزر
+                )
+            except Exception:
+                pass
+
+        context.user_data["account_base"] = text
+        set_user_state(user.id, "CREATING_PASSWORD")
+        new_msg = await update.message.reply_text(
+            MSG_ASK_PASS, reply_markup=back_only_markup()
+        )
+        context.user_data["last_msg_id"] = new_msg.message_id
+        await add_to_stack(context, new_msg.message_id)
+
+    # --- مرحلة 2: استلام الباسورد والمعالجة (مع الأنيميشن الكامل) ---
+    elif state == "CREATING_PASSWORD":
+        await delete_msg(user_msg_id)
+        if re.search(r"[\u0600-\u06FF]", text):
+            msg = await update.message.reply_text(
+                "⚠️ كلمة المرور يجب أن تكون بالإنجليزية.",
+                reply_markup=back_only_markup(),
+            )
+            await add_to_stack(context, msg.message_id)
+            return  # نتوقف هنا ليعيد المحاولة
+
+        # إذا نجحت كلمة السر: نعدل رسالة طلب الباسورد السابقة
+        last_msg_id = context.user_data.get("last_msg_id")
+        if last_msg_id:
+            try:
+                await context.bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=last_msg_id,
+                    text=f"✅ تم استلام كلمة المرور بنجاح.",
+                    reply_markup=None,
+                )
+            except Exception:
+                pass
+
+        # الآن تبدأ عملية المعالجة
+        set_user_state(user.id, "PROCESSING")
+        status_msg = await update.message.reply_text(ANIMATION_STEP_1)
+
+        try:
+            final_account_name = generate_account_name(
+                context.user_data.get("account_base"), user.id
+            )
+            account = create_account_record(user_row["id"], final_account_name, text)
+
+            order = create_order(
+                user_row["id"], "create", account_id=account["id"], data="إنشاء حساب"
+            )
+
+            await update_live_card(context.bot, user_row["id"])
+            await post_order_to_admin_group(context.application, order)
+
+            # استعادة نظام الأنيميشن الأصلي بالكامل
+            for step in [ANIMATION_STEP_2, ANIMATION_STEP_3, ANIMATION_STEP_4]:
+                await asyncio.sleep(1.5)
+                await status_msg.edit_text(step)
+
+            await clear_stack(update, context)
+            user_role = "admin" if user.id in ADMIN_IDS else "user"
+            menu_msg = await status_msg.edit_text(
+                MSG_SUCCESS_USER,
+                parse_mode=ParseMode.HTML,
+                reply_markup=main_menu_keyboard(user_role),
+                )
+
+            context.user_data["last_menu_msg_id"] = menu_msg.message_id
+
+        except Exception as e:
+            logging.error(f"Process Error: {e}")
+            if "status_msg" in locals():
+                await status_msg.edit_text("❌ حدث خطأ، يرجى المحاولة لاحقاً.")
+
+        finally:
+            set_user_state(user.id, "WAIT_SERVICE")
+            context.user_data.pop("account_base", None)
+            context.user_data.pop("last_error_id", None)
+
+
+def register_account_handlers(app):
+    app.add_handler(
+        MessageHandler(filters.TEXT & ~filters.COMMAND, account_manager_handler)
+    )
+
+
+# ==========================================
+# FILE: .\handlers\admin.py
+# ==========================================
+
+# handlers/admin.py
+import asyncio
+from telegram import InlineKeyboardMarkup, InlineKeyboardButton, Update
+from telegram.ext import ContextTypes, CallbackQueryHandler, CommandHandler
+from telegram.constants import ParseMode
+from config import ADMIN_IDS
+from database.repository import (
+    get_order_by_code,
+    update_order_status,
+    get_account_by_id,
+    update_account_name,
+    get_conn,
+    get_all_users_ids,
+    update_payment_number_db,
+)
+from services.generators import generate_account_name
+from keyboards.main import back_only_markup
+
+# --- دوال الإذاعة والتحكم ---
+
+
+async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if user.id not in ADMIN_IDS:
+        return
+    message = " ".join(context.args)
+    if not message:
+        await update.message.reply_text("⚠️ الرجاء كتابة الرسالة بعد الأمر.")
+        return
+    await update.message.reply_text(f"⏳ جاري بدء الإذاعة...")
+    users = get_all_users_ids()
+    count, blocked = 0, 0
+    for user_id in users:
+        try:
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=f"📢 <b>رسالة عامة</b>\n\n{message}",
+                parse_mode=ParseMode.HTML,
+            )
+            count += 1
+            if count % 20 == 0:
+                await asyncio.sleep(1)
+        except:
+            blocked += 1
+    await update.message.reply_text(
+        f"✅ تم الإرسال لـ: {count}\n🚫 حظروا البوت: {blocked}"
+    )
+
+
+async def dm_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if user.id not in ADMIN_IDS:
+        return
+    if len(context.args) < 2:
+        await update.message.reply_text("⚠️ الاستخدام: `/dm [ID] [الرسالة]`")
+        return
+    target_id, message = context.args[0], " ".join(context.args[1:])
+    try:
+        await context.bot.send_message(
+            chat_id=int(target_id),
+            text=f"📩 <b>رسالة من الإدارة:</b>\n\n{message}",
+            parse_mode=ParseMode.HTML,
+        )
+        await update.message.reply_text(f"✅ تم الإرسال إلى {target_id}")
+    except Exception as e:
+        await update.message.reply_text(f"❌ فشل: {e}")
+
+
+async def set_payment_number_command(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+):
+    user = update.effective_user
+    if user.id not in ADMIN_IDS:
+        return
+    command = update.message.text.split()[0].replace("/", "")
+    if len(context.args) < 1:
+        await update.message.reply_text(f"⚠️ الرجاء وضع الرقم الجديد.")
+        return
+    new_number = context.args[0]
+    method = "syriatel" if "syriatel" in command else "sham"
+    update_payment_number_db(method, new_number)
+    await update.message.reply_text(
+        f"✅ تم تحديث رقم {method.upper()} إلى: {new_number}"
+    )
+
+
+# --- معالج أزرار الإدارة ---
+
+
+async def admin_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user = update.effective_user
+    if user.id not in ADMIN_IDS:
+        await query.answer("⛔ ليس لديك صلاحية.", show_alert=True)
+        return
+
+    data_parts = query.data.split("|")
+    action = data_parts[1]
+
+    # إصلاح IndexError: التحقق من زر لوحة التحكم
+    if action == "dashboard":
+        await query.answer()
+        text = (
+            "🛠️ <b>لوحة تحكم المشرفين:</b>\n\n"
+            "<code>/broadcast [نص]</code> - إذاعة للكل\n"
+            "<code>/dm [آيدي] [نص]</code> - رسالة خاصة\n"
+            "<code>/set_syriatel [رقم]</code> - تحديث سيريتيل\n"
+            "<code>/set_sham [رقم]</code> - تحديث شام"
+        )
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=back_only_markup())
+        return
+
+    if len(data_parts) < 3:
+        return
+    order_code = data_parts[2]
+    order = get_order_by_code(order_code)
+    if not order:
+        await query.answer("❌ الطلب غير موجود", show_alert=True)
+        return
+
+    async def safe_edit(new_text, new_markup):
+        try:
+            if query.message.photo:
+                await query.edit_message_caption(
+                    caption=new_text, reply_markup=new_markup, parse_mode=ParseMode.HTML
+                )
+            else:
+                await query.edit_message_text(
+                    text=new_text, reply_markup=new_markup, parse_mode=ParseMode.HTML
+                )
+        except:
+            pass
+
+    if action == "claim":
+        await query.answer("✅ بدأت المعالجة")
+        current_text = (
+            query.message.caption_html
+            if query.message.photo
+            else query.message.text_html
+        )
+        new_text = (
+            current_text + f"\n\n⏳ <b>قيد المعالجة بواسطة:</b> {user.first_name}"
+        )
+        keyboard = [
+            [
+                InlineKeyboardButton(
+                    "✅ تم", callback_data=f"admin|confirm|{order_code}"
+                ),
+                InlineKeyboardButton(
+                    "❌ رفض", callback_data=f"admin|reject|{order_code}"
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    "🔄 إعادة توليد الاسم",
+                    callback_data=f"admin|regen_ask|{order_code}",
+                )
+            ],
+        ]
+        await safe_edit(new_text, InlineKeyboardMarkup(keyboard))
+
+    elif action == "regen_ask":
+        await query.answer()
+        keyboard = [
+            [
+                InlineKeyboardButton(
+                    "نعم، غيّر الاسم", callback_data=f"admin|regen_do|{order_code}"
+                ),
+                InlineKeyboardButton(
+                    "تراجع", callback_data=f"admin|regen_cancel|{order_code}"
+                ),
+            ]
+        ]
+        await query.edit_message_reply_markup(
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+    elif action == "regen_do":
+        account = get_account_by_id(order["account_id"])
+        new_name = generate_account_name(account["account_name"], user.id)
+        update_account_name(account["id"], new_name)
+        await query.answer("🔄 تم التغيير!")
+        current_text = (
+            query.message.caption_html
+            if query.message.photo
+            else query.message.text_html
+        )
+        updated_text = (
+            current_text.split("\n\n✏️")[0]
+            + f"\n\n✏️ <b>الاسم الجديد:</b> <code>{new_name}</code>"
+        )
+        keyboard = [
+            [
+                InlineKeyboardButton(
+                    "✅ تم", callback_data=f"admin|confirm|{order_code}"
+                ),
+                InlineKeyboardButton(
+                    "❌ رفض", callback_data=f"admin|reject|{order_code}"
+                ),
+            ]
+        ]
+        await safe_edit(updated_text, InlineKeyboardMarkup(keyboard))
+
+    elif action == "confirm":
+        account = get_account_by_id(order["account_id"])
+        conn = get_conn()
+        user_row = conn.execute(
+            "SELECT telegram_id FROM users WHERE id=?", (order["user_id"],)
+        ).fetchone()
+        conn.close()
+        if user_row:
+            try:
+                msg = f"✅ <b>تم تفعيل حسابك</b>\n\n👤 <b>الاسم:</b> <code>{account['account_name']}</code>\n🔑 <b>الباسورد:</b> <code>{account['password']}</code>"
+                await context.bot.send_message(
+                    chat_id=user_row["telegram_id"], text=msg, parse_mode=ParseMode.HTML
+                )
+            except:
+                pass
+        update_order_status(order_code, "completed", processed_by=user.id)
+        await query.answer("✅ تم")
+        await safe_edit("✅ تم التنفيذ بنجاح.", None)
+
+    elif action == "reject":
+        update_order_status(order_code, "rejected", processed_by=user.id)
+        await query.answer("❌ تم الرفض")
+        await safe_edit("❌ تم رفض الطلب.", None)
+
+
+def register_admin_handlers(app):
+    app.add_handler(CallbackQueryHandler(admin_cb, pattern="^admin\|"))
+    app.add_handler(CommandHandler("broadcast", broadcast_command))
+    app.add_handler(CommandHandler("dm", dm_command))
+    app.add_handler(CommandHandler("set_syriatel", set_payment_number_command))
+    app.add_handler(CommandHandler("set_sham", set_payment_number_command))
+
+
+# ==========================================
+# FILE: .\handlers\deposit_withdraw.py
+# ==========================================
+
+# handlers/deposit_withdraw.py
+from telegram.ext import MessageHandler, filters
+from database.repository import get_user_by_telegram, get_accounts_by_user, create_order
+from services.notifications import post_order_to_admin_group
+from database.repository import get_account, update_account_balance, set_user_state
+
+# Simplified flow using text inputs for demo:
+# - After selecting account (client side), user will send amount as text
+# - For deposit: after amount, ask for photo then create order with proof_photo in photo handler
+
+
+async def generic_text_handler(update, context):
+    user = update.effective_user
+    row = get_user_by_telegram(user.id)
+    if not row:
+        await update.message.reply_text("ابدأ أولاً بإرسال /start")
+        return
+    state = row["state"]
+    text = update.message.text.strip()
+    if state and state.startswith("DEPOSIT_AMOUNT::"):
+        account_id = int(state.split("::", 1)[1])
+        try:
+            amount = float(text)
+        except:
+            await update.message.reply_text("ادخل مبلغًا صحيحًا بالأرقام.")
+            return
+        # store in user_data and change state to wait proof
+        context.user_data["pending_deposit"] = {
+            "account_id": account_id,
+            "amount": amount,
+        }
+        set_user_state(user.id, "DEPOSIT_WAIT_PROOF")
+        await update.message.reply_text("أرسل الآن صورة إثبات التحويل (لقطة).")
+        return
+    if state and state.startswith("WITHDRAW_AMOUNT::"):
+        account_id = int(state.split("::", 1)[1])
+        try:
+            amount = float(text)
+        except:
+            await update.message.reply_text("ادخل مبلغًا صحيحًا بالأرقام.")
+            return
+        acc = get_account(account_id)
+        if not acc:
+            await update.message.reply_text("حصل خطأ: الحساب غير موجود.")
+            set_user_state(user.id, "WAIT_SERVICE")
+            return
+        if acc["balance"] < amount:
+            await update.message.reply_text(f"رصيد غير كافِ. رصيدك: {acc['balance']}")
+            set_user_state(user.id, "WAIT_SERVICE")
+            return
+        order = create_order(
+            user.id, "withdraw", account_id=account_id, amount=amount, data="طلب سحب"
+        )
+        await post_order_to_admin_group(context.application, order)
+        await update.message.reply_text(
+            "تم إرسال طلب السحب للمشرفين. سيتم إعلامك بعد التنفيذ."
+        )
+        set_user_state(user.id, "WAIT_SERVICE")
+        return
+
+
+# photo handler for deposit proof
+async def photo_handler(update, context):
+    user = update.effective_user
+    row = get_user_by_telegram(user.id)
+    if not row or row["state"] != "DEPOSIT_WAIT_PROOF":
+        return
+    pending = context.user_data.get("pending_deposit")
+    if not pending:
+        await update.message.reply_text("لا يوجد عملية تعبئة معلقة.")
+        set_user_state(user.id, "WAIT_SERVICE")
+        return
+    photo = update.message.photo[-1]
+    file_id = photo.file_id
+    account_id = pending["account_id"]
+    amount = pending["amount"]
+    order = create_order(
+        user.id,
+        "deposit",
+        account_id=account_id,
+        amount=amount,
+        data="تعبئة",
+        proof_file_id=file_id,
+    )
+    await post_order_to_admin_group(
+        context.application, order, include_photo_file_id=file_id
+    )
+    await update.message.reply_text(
+        "تم استلام إثبات التحويل. سيتم مراجعته من قبل المشرفين."
+    )
+    context.user_data.pop("pending_deposit", None)
+    set_user_state(user.id, "WAIT_SERVICE")
+
+
+def register_deposit_withdraw_handlers(app):
+    app.add_handler(MessageHandler(filters.PHOTO & ~filters.COMMAND, photo_handler))
+    app.add_handler(
+        MessageHandler(filters.TEXT & ~filters.COMMAND, generic_text_handler)
+    )
+
+
+# ==========================================
+# FILE: .\handlers\main_menu.py
+# ==========================================
+
+# handlers/main_menu.py
+import time
+from telegram.ext import CallbackQueryHandler
+from telegram import InlineKeyboardMarkup, InlineKeyboardButton
+
+from keyboards.main import (
+    back_nav_markup,
+    account_actions_markup,
+    confirm_delete_markup,
+    back_only_markup,
+)
+from strings import (
+    MSG_FLOOD_WARN,
+    MSG_DELETE_USED,
+    MSG_ACCOUNT_DELETED,
+    MSG_CONFIRM_DELETE,
+)
+from database.repository import (
+    get_user_by_telegram,
+    get_accounts_by_user,
+    set_user_state,
+    count_user_accounts,
+    get_user_delete_permission,
+    delete_user_account_permanently,
+    get_account_by_id,  # نحتاج هذه الدالة لجلب الحساب عند الإلغاء
+)
+from services.scoring import get_user_score_details_text
+from config import ADMIN_IDS
+from handlers.navigation import add_to_stack
+
+
+async def main_menu_cb(update, context):
+    query = update.callback_query
+
+    # --- Anti-Flood ---
+    current_time = time.time()
+    last_click = context.user_data.get("last_click_time", 0)
+    if current_time - last_click < 0.5:
+        await query.answer(MSG_FLOOD_WARN, show_alert=False)
+        return
+    context.user_data["last_click_time"] = current_time
+
+    data = query.data
+    parts = data.split("|")
+    user = update.effective_user
+    user_row = get_user_by_telegram(user.id)
+
+    # دالة مساعدة لعرض تفاصيل الحساب (لمنع تكرار الكود)
+    async def show_account_details(account_data, show_pass=False):
+        pass_display = (
+            account_data["password"]
+            if show_pass
+            else "*" * len(account_data["password"])
+        )
+        btn_text = "🙈 إخفاء كلمة المرور" if show_pass else "👁️ إظهار كلمة المرور"
+        next_state = "hide" if show_pass else "show"
+
+        status_map = {
+            "pending": "⏳ قيد المراجعة",
+            "active": "✅ فعال",
+            "completed": "✅ فعال",
+        }
+        status_text = status_map.get(account_data["status"], account_data["status"])
+
+        info_text = (
+            f"<blockquote><b>👤 تفاصيل حساب اللعبة</b></blockquote>\n\n"
+            f"<b>🆔 تليجرام ID:</b> <code>{user.id}</code>\n"
+            f"<b>🔖 الاسم:</b> <code>{account_data['account_name']}</code>\n"
+            f"<b>🔐 كلمة المرور:</b> <code>{pass_display}</code>\n"
+            f"<b>📡 الحالة:</b> {status_text}\n"
+            f"‎" + "—" * 20
+        )
+
+        markup = account_actions_markup(account_data["id"])
+        keyboard_list = list(markup.inline_keyboard)
+        keyboard_list.append(
+            [
+                InlineKeyboardButton(
+                    btn_text,
+                    callback_data=f"act|toggle_pass|{next_state}|{account_data['id']}",
+                )
+            ]
+        )
+
+        msg = await query.edit_message_text(
+            info_text,
+            reply_markup=InlineKeyboardMarkup(keyboard_list),
+            parse_mode="HTML",
+        )
+        context.user_data["last_menu_msg_id"] = msg.message_id
+
+    # --- القوائم الرئيسية ---
+    if parts[0] == "main":
+        await query.answer()
+        action = parts[1]
+
+        if action == "account_manager":
+            account_count = count_user_accounts(user_row["id"])
+            if account_count > 0:
+                accounts = get_accounts_by_user(user_row["id"])
+                await show_account_details(accounts[0], show_pass=False)
+            else:
+                set_user_state(user.id, "CREATING_USERNAME")
+                msg = await query.edit_message_text(
+                    "📝 <b>لإنشاء حساب جديد:</b>\n\nأرسل الآن " \
+                    "الاسم الذي تريده (أحرف إنجليزية فقط).",
+                    parse_mode="HTML",
+                    reply_markup=back_only_markup(),
+                )
+                context.user_data["last_msg_id"] = msg.message_id
+                await add_to_stack(context, msg.message_id)
+
+        elif action == "my_score":
+            score_text = get_user_score_details_text(user_row)
+            await query.edit_message_text(
+                text=score_text, reply_markup=back_only_markup(), parse_mode="HTML"
+            )
+
+    # --- إجراءات الحساب ---
+    elif parts[0] == "act":
+        sub_action = parts[1]
+        account_id = parts[2]
+
+        if sub_action == "toggle_pass":
+            target_state = parts[2]  # show/hide
+            real_acc_id = parts[3]
+            acc = get_account_by_id(real_acc_id)
+            if acc:
+                await show_account_details(acc, show_pass=(target_state == "show"))
+            else:
+                await query.answer("⚠️ الحساب غير موجود", show_alert=True)
+
+        elif sub_action == "delete_req":
+            await query.answer()
+            if get_user_delete_permission(user_row["id"]) or user.id in ADMIN_IDS:
+                await query.edit_message_text(
+                    MSG_CONFIRM_DELETE, reply_markup=confirm_delete_markup(account_id)
+                )
+            else:
+                await query.answer(MSG_DELETE_USED, show_alert=True)
+
+        elif sub_action == "cancel_del":
+            # إلغاء الحذف والعودة لعرض الحساب
+            await query.answer("تم إلغاء الحذف")
+            acc = get_account_by_id(account_id)
+            if acc:
+                await show_account_details(acc, show_pass=False)
+
+        elif sub_action == "delete_confirm":
+            await query.answer()
+            if delete_user_account_permanently(user_row["id"], account_id):
+                await query.edit_message_text(
+                    MSG_ACCOUNT_DELETED, reply_markup=back_only_markup()
+                )
+
+
+def register_main_menu_handlers(app):
+    app.add_handler(CallbackQueryHandler(main_menu_cb, pattern=r"^(main|act)\|"))
+
+
+# ==========================================
+# FILE: .\handlers\navigation.py
+# ==========================================
+
+# handlers/navigation.py
+from telegram.ext import CallbackQueryHandler
+from telegram.error import BadRequest
+from keyboards.main import main_menu_keyboard
+from database.repository import set_user_state, get_user_by_telegram
+from config import ADMIN_IDS
+
+
+async def nav_handler(update, context):
+    query = update.callback_query
+    data = query.data
+    user = update.effective_user
+
+    # الرد السريع
+    try:
+        await query.answer()
+    except Exception:
+        pass
+
+    await clear_stack(update, context)
+
+    try:
+        action = data.split("|")[1]
+    except (IndexError, AttributeError):
+        return
+
+    # منع الرجوع أثناء إنشاء الحساب
+    user_row = get_user_by_telegram(user.id)
+    current_state = user_row["state"] if user_row else "START"
+    if action == "back" and current_state == "CREATING_USERNAME":
+        await query.answer("⚠️ أكمل إنشاء الحساب أو أرسل /start", show_alert=True)
+        return
+
+    set_user_state(user.id, "START")
+
+    user_name = user.first_name or "زميل"
+    db_id = user_row["telegram_id"] if user_row else user.id
+    wallet = user_row["wallet_balance"] if user_row else 0.0
+    user_role = "admin" if user.id in ADMIN_IDS else "user"
+
+    welcome_text = (
+        f"<blockquote><b>👋 أهلاً {user_name}</b></blockquote>\n\n"
+        f"<b>🆔 آيدي حسابك:</b> <code>{db_id}</code>\n"
+        f"<b>💰 الرصيد الحالي:</b> <code>{wallet:,}</code> SYP\n"
+        f"‎" + "—" * 20 + "\n"
+        f"<b>اختر الخدمة المطلوبة:</b>"
+    )
+
+    # -------------------------------------------------------
+    # ✅ الإصلاح: تجاهل خطأ "Message is not modified" تماماً
+    # -------------------------------------------------------
+    try:
+        await query.edit_message_text(
+            text=welcome_text,
+            reply_markup=main_menu_keyboard(user_role),
+            parse_mode="HTML",
+        )
+    except BadRequest as e:
+        if "Message is not modified" in str(e):
+            # المستخدم ضغط رجوع وهو أصلاً في القائمة، لا تفعل شيئاً ولا تطبع خطأ
+            pass
+        else:
+            # إذا كان خطأ آخر حقيقي، اطبعه
+            print(f"Error in navigation: {e}")
+
+
+def register_navigation_handlers(app):
+    app.add_handler(CallbackQueryHandler(nav_handler, pattern="^nav\|"))
+
+
+async def add_to_stack(context, msg_id):
+    """اضافة رسالة  الى قائمة الحذف المؤجل"""
+    if "msg_stack" not in context.user_data:
+        context.user_data["msg_stack"] = []
+    context.user_data["msg_stack"].append(msg_id)
+
+
+async def clear_stack(update, context):
+    """تشغيل المكنسةوحذف كل ما تم تسجيله"""
+    chat_id = update.effective_chat.id
+    stack = context.user_data.get("msg_stack", [])
+    for m_id in stack:
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=m_id)
+        except Exception:
+            pass
+    context.user_data["msg_stack"] = []
+
+
+# ==========================================
+# FILE: .\handlers\start.py
+# ==========================================
+
+# handlers/start.py
+from telegram.ext import CommandHandler, ConversationHandler
+from telegram.constants import ParseMode
+from keyboards.main import main_menu_keyboard  # تأكد من مطابقة الاسم الجديد
+from database.repository import ensure_user, set_user_state, get_user_by_telegram
+from handlers.navigation import clear_stack
+
+
+async def start(update, context):
+    await clear_stack(update, context)
+    user = update.effective_user
+
+    # 1. حذف الرسالة التي أرسلها المستخدم (/start) للحفاظ على نظافة الدردشة
+    if update.message:
+        try:
+            await update.message.delete()
+        except Exception:
+            pass
+
+    # 2. حذف رسالة البوت السابقة (القائمة القديمة) لتجنب التكرار
+    last_msg_id = context.user_data.get("last_menu_msg_id")
+    if last_msg_id:
+        try:
+            await context.bot.delete_message(
+                chat_id=update.effective_chat.id, message_id=last_msg_id
+            )
+        except Exception:
+            pass
+
+    context.user_data.clear()
+
+    # 3. التأكد من وجود المستخدم في قاعدة البيانات وجلب بياناته
+    ensure_user(user)
+    user_row = get_user_by_telegram(user.id)
+
+    # تحديد دور المستخدم (أدمن أو مستخدم عادي) لعرض الأزرار المناسبة
+    from config import ADMIN_IDS
+
+    user_role = "admin" if user.id in ADMIN_IDS else "user"
+
+    # إعادة ضبط حالة المستخدم
+    set_user_state(user.id, "WAIT_SERVICE")
+
+    user_name = user.first_name or "زميل"
+    user_id = user.id
+    balance = user_row["wallet_balance"] if user_row else 0
+
+    welcome_text = (
+        f"<blockquote><b>👋 أهلاً بك يا {user_name}</b></blockquote>\n\n"
+        f"<b>🆔 آيدي حسابك:</b> <code>{user_id}</code>\n"
+        f"<b>💰 رصيدك الحالي:</b> <code>{balance:,}</code> SYP\n\n"
+        f"<b>اختر الخدمة المطلوبة من القائمة أدناه 📍</b>\n"
+        f"‎" + "—" * 20
+    )
+
+    # 4. إرسال القائمة الرئيسية الجديدة وتخزين الـ ID
+    new_msg = await context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text=welcome_text,
+        reply_markup=main_menu_keyboard(user_role),  # استدعاء الاسم الصحيح مع الدور
+        parse_mode=ParseMode.HTML,
+    )
+    context.user_data["last_menu_msg_id"] = new_msg.message_id
+
+    # 5. إنهاء أي محادثة (Conversation) كانت نشطة
+    return ConversationHandler.END
+
+
+def register_start_handlers(app):
+    app.add_handler(CommandHandler("start", start))
+
+
+# ==========================================
+# FILE: .\handlers\wallet.py
+# ==========================================
+
+# handlers/wallet.py
+import logging
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ContextTypes, ConversationHandler
+from database.repository import (
+    get_user_by_telegram,
+    set_user_state,
+    create_order,
+    update_order_status,
+    update_user_wallet_balance,
+    get_order_by_code,
+    has_pending_deposit,
+    is_transaction_used,
+    increment_incomplete_orders,
+    update_user_stats_after_transaction,
+    get_payment_numbers,
+    get_bot_account_name,
+)
+from handlers.navigation import add_to_stack
+from database.db import get_conn
+from config import DEPOSITS_GROUP_ID, ADMIN_IDS
+from services.scoring import (
+    calculate_user_score,
+    get_user_tier_info,
+    update_live_card,
+    get_archive_link,
+)
+from keyboards.main import back_only_markup
+
+# إعداد السجلات للتتبع
+logger = logging.getLogger(__name__)
+
+# تعريف الحالات
+WAIT_AMOUNT, WAIT_CODE = range(2)
+MIN_DEPOSIT = 25000
+MAX_DEPOSIT = 10000000
+
+
+def get_user_by_id_helper(db_id):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM users WHERE id=?", (db_id,))
+    res = cur.fetchone()
+    conn.close()
+    return res
+
+
+async def start_deposit(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    print("🚀 [WALLET] دخلنا دالة start_deposit")  # تتبع في التيرمنال
+
+    user = update.effective_user
+    user_row = get_user_by_telegram(user.id)
+
+    if has_pending_deposit(user_row["id"]):
+        await query.edit_message_text(
+            "⚠️ لديك طلب إيداع قيد المراجعة حالياً، يرجى الانتظار.",
+            reply_markup=back_only_markup(),
+        )
+        return ConversationHandler.END
+
+    increment_incomplete_orders(user_row["id"])
+
+    text = (
+        f"💰 <b>إيداع رصيد (المحفظة)</b>\n\n"
+        f"💵 رصيدك الحالي: <code>{user_row['wallet_balance']:,}</code> SYP\n"
+        f"⚠️ الحد الأدنى للإيداع: <b>{MIN_DEPOSIT:,}</b> SYP\n\n"
+        f"أرسل الآن المبلغ الذي تود شحنه:"
+    )
+
+    await query.edit_message_text(
+        text, parse_mode="HTML", reply_markup=back_only_markup()
+    )
+    context.application.user_data[user.id]["deposit_msg_id"] = query.message.message_id
+    return WAIT_AMOUNT
+
+
+async def receive_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+    user_id = update.effective_user.id
+    msg_id = context.user_data.get("deposit_msg_id")
+
+    # 1. حذف رسالة المستخدم فوراً (تنظيف)
+    try:
+        await update.message.delete()
+    except:
+        pass
+
+    # 2. التحقق: هل النص أرقام فقط؟
+    if not text.isdigit():
+        # إذا أرسل نصاً، نعيد طلب المبلغ مع تنبيه
+        try:
+            await context.bot.edit_message_text(
+                chat_id=user_id,
+                message_id=msg_id,
+                text=f"⚠️ <b>خطأ:</b> الرجاء إرسال أرقام فقط (بدون أحرف أو رموز).\n\nأعد كتابة المبلغ:",
+                parse_mode="HTML",
+                reply_markup=back_only_markup(),
+            )
+        except:
+            pass
+        return WAIT_AMOUNT
+
+    amount = int(text)
+
+    # 3. التحقق: هل المبلغ ضمن الحدود (بين 25 ألف و 5 مليون)؟
+    if amount < MIN_DEPOSIT or amount > MAX_DEPOSIT:
+        try:
+            await context.bot.edit_message_text(
+                chat_id=user_id,
+                message_id=msg_id,
+                text=f"⚠️ <b>مبلغ غير مقبول!</b>\n"
+                f"🔴 الحد الأدنى: {MIN_DEPOSIT:,}\n"
+                f"🔴 الحد الأعلى: {MAX_DEPOSIT:,}\n\n"
+                f"أعد كتابة المبلغ بشكل صحيح:",
+                parse_mode="HTML",
+            )
+        except:
+            pass
+        return WAIT_AMOUNT
+
+    # ✅ المبلغ سليم، ننتقل للتالي
+    context.user_data["deposit_amount"] = amount
+
+    keyboard = [
+        [
+            InlineKeyboardButton("🔴 Syriatel Cash", callback_data="pay|syriatel"),
+            InlineKeyboardButton("🟢 Sham Cash", callback_data="pay|sham"),
+        ],
+        [InlineKeyboardButton("🔙 إلغاء", callback_data="nav|home")],
+    ]
+
+    if msg_id:
+        try:
+            await context.bot.edit_message_text(
+                chat_id=update.effective_chat.id,
+                message_id=msg_id,
+                text=f"✅ المبلغ المطلوب: <b>{amount:,} SYP</b>\n\nاختر وسيلة الدفع:",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode="HTML",
+            )
+        except Exception:
+            pass
+    return WAIT_CODE  # ننتظر اختيار الوسيلة ثم الكود
+
+
+async def select_payment_method(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    method = query.data.split("|")[1]
+    context.user_data["payment_method"] = method
+
+    print(f"💳 [WALLET] تم اختيار الوسيلة: {method}")
+
+    # جلب الأرقام من الداتا بيس بدلاً من الأرقام الثابتة
+    from database.repository import get_payment_numbers
+
+    numbers = get_payment_numbers()
+    phone = numbers.get(method, "09xxxxxxxx")
+
+    instruction = (
+        f"📥 <b>تعليمات الدفع ({method.upper()})</b>\n"
+        f"━━━━━━━━━━━━━━\n"
+        f"يرجى التحويل إلى الرقم: <code>{phone}</code>\n"
+        f"المبلغ المطلوب: <b>{context.user_data['deposit_amount']:,}</b> SYP\n\n"
+        f"⚠️ <b>أرسل رمز العملية الآن لتأكيد الطلب:</b>"
+    )
+    await query.edit_message_text(instruction, parse_mode="HTML")
+    return WAIT_CODE
+
+
+async def receive_transaction_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_code = update.message.text.strip()
+    method = context.user_data.get("payment_method")
+    msg_id = context.user_data.get("deposit_msg_id")
+    amount = context.user_data.get("deposit_amount")
+    chat_id = update.effective_chat.id
+
+    print(f"🔢 [WALLET] تم استلام الكود: {user_code}")
+
+    # 1. حذف رسالة المستخدم فوراً
+    try:
+        await update.message.delete()
+    except Exception:
+        pass
+
+    # 2. تحديد الطول المطلوب بناءً على الوسيلة
+    required_len = 12 if method == "syriatel" else 8
+
+    # 3. فحص الأخطاء (أحرف أو طول غير متطابق)
+    error_msg = None
+    if not user_code.isdigit():
+        error_msg = (
+            "⚠️ <b>خطأ:</b> الكود يجب أن يتكون من أرقام فقط.\nأعد إرسال الكود الصحيح:"
+        )
+    elif len(user_code) != required_len:
+        error_msg = f"⚠️ <b>خطأ:</b> كود {method.upper()} يجب أن يكون {required_len} رقم.\nأنت أرسلت {len(user_code)} رقم. أعد المحاولة:"
+
+    if error_msg:
+        try:
+            await context.bot.edit_message_text(
+                chat_id=chat_id, message_id=msg_id, text=error_msg, parse_mode="HTML"
+            )
+        except:
+            pass
+        return WAIT_CODE
+
+    # 4. فحص التكرار (مع تعديل الرسالة بدلاً من إرسال واحدة جديدة)
+    if is_transaction_used(user_code):
+        try:
+            await context.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=msg_id,
+                text="⚠️ <b>عذراً:</b> هذا الكود مستخدم مسبقاً في عملية أخرى.\nتأكد من الكود وأعد إرساله:",
+                parse_mode="HTML",
+            )
+        except:
+            pass
+        return WAIT_CODE
+
+    # --- إذا اجتاز الفحوصات، نكمل الإجراءات ---
+    user = update.effective_user
+    user_row = get_user_by_telegram(user.id)
+
+    if not user_row:
+        return ConversationHandler.END
+
+    order = create_order(
+        user_id=user_row["id"],
+        service="WALLET_DEPOSIT",
+        amount=amount,
+        data=f"Method: {method}",
+        transaction_code=user_code,
+    )
+
+    # جلب معلومات التقييم والأرشفة
+    score = calculate_user_score(user_row)
+    tier_info = get_user_tier_info(score)
+    archive_url = get_archive_link(user_row)
+    user_tg_link = f"<a href='tg://user?id={user.id}'>{user.first_name}</a>"
+
+    bot_account_name = get_bot_account_name(user_row["id"]) or "بدون اسم"
+
+    if archive_url:
+        account_link = f"<a href='{archive_url}'>{bot_account_name}</a>"
+    else:
+        account_link = f"<code>{bot_account_name}</code> (لا يوجد ارشيف)"
+
+    # تحضير رسالة المشرف (تجهيزاً للروابط الزرقاء في الخطوة القادمة)
+    admin_text = (
+        f"📥 <b>طلب إيداع جديد (#{order['order_code']})</b>\n"
+        f"━━━━━━━━━━━━━━\n"
+        f"👤 <b>المستخدم:</b> {user_tg_link} | {tier_info['name']}\n"
+        f"🗂 <b>الحساب: </b> {account_link}\n"
+        f"📊 <b>التقييم:</b> {tier_info['stars']} ({score} نقطة)\n"
+        f"━━━━━━━━━━━━━━\n"
+        f"💰 <b>المبلغ:</b> {amount:,} SYP\n"
+        f"🏦 <b>الوسيلة:</b> {method}\n"
+        f"🔢 <b>الكود:</b> <code>{user_code}</code>\n"
+    )
+
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                "✅ قبول", callback_data=f"dep_adm|approve|{order['order_code']}"
+            ),
+            InlineKeyboardButton(
+                "❌ رفض", callback_data=f"dep_adm|reject_menu|{order['order_code']}"
+            ),
+        ]
+    ]
+
+    await context.bot.send_message(
+        chat_id=DEPOSITS_GROUP_ID,
+        text=admin_text,
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
+    await context.bot.edit_message_text(
+        chat_id=chat_id,
+        message_id=msg_id,
+        text="✅ <b>تم استلام طلبك بنجاح!</b>\nسيتم إشعارك فور معالجة الطلب من قبل الإدارة.",
+        parse_mode="HTML",
+    )
+    await add_to_stack(context, msg_id)
+
+    return ConversationHandler.END
+
+
+async def admin_deposit_decision(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if query.from_user.id not in ADMIN_IDS:
+        return
+
+    data = query.data.split("|")
+    action, order_code = data[1], data[2]
+    order = get_order_by_code(order_code)
+
+    if not order or order["status"] != "pending":
+        await query.answer("⚠️ تم التعامل معه مسبقاً.")
+        return
+
+    user_db = get_user_by_id_helper(order["user_id"])
+
+    if action == "approve":
+        # 1. تحديثات الداتابيز (تأكد أن هذا الجزء يعمل لديك)
+        update_order_status(order_code, "completed", processed_by=query.from_user.id)
+        update_user_wallet_balance(user_db["id"], order["amount"])
+        update_user_stats_after_transaction(
+            user_db["id"], order["amount"], is_deposit=True, is_success=True
+        )
+        await update_live_card(context.bot, user_db["id"])
+
+        # 2. تحديث رسالة الإدارة
+        await query.edit_message_text(
+            query.message.text + f"\n\n✅ تم القبول بواسطة: {query.from_user.first_name}"
+        )
+
+        # --- التصحيح هنا ---
+        user_id_tg = user_db["telegram_id"]
+
+        # الوصول لذاكرة المستخدم بشكل آمن
+        user_data = context.application.user_data.get(user_id_tg, {})
+
+        # جلب آيدي الرسالة القديمة من الذاكرة (وليس من user_db)
+        old_msg_id = user_data.get("deposit_msg_id")
+
+        # 3. محاولة حذف الرسالة القديمة
+        if old_msg_id:
+            try:
+                await context.bot.delete_message(chat_id=user_id_tg, message_id=old_msg_id)
+            except Exception as e:
+                logging.error(f"Error deleting old deposit msg: {e}")
+
+        # 4. إرسال رسالة النجاح للمستخدم
+        sent_msg = await context.bot.send_message(
+            chat_id=user_id_tg,
+            text=f"✅ <b>تم قبول إيداعك بمبلغ {order['amount']:,} SYP بنجاح!</b>\nتمت إضافة الرصيد إلى محفظتك.",
+            parse_mode="HTML"
+        )
+
+        # 5. إضافة الرسالة الجديدة للمكنسة (تأكد من إنشاء الـ stack إذا لم يكن موجوداً)
+        if "msg_stack" not in user_data:
+            context.application.user_data[user_id_tg]["msg_stack"] = []
+
+        context.application.user_data[user_id_tg]["msg_stack"].append(sent_msg.message_id)
+
+    elif action == "reject_menu":
+        keyboard = [
+            [InlineKeyboardButton("❌ مبلغ غير متطابق", callback_data=f"dep_adm|do_reject|{order_code}|mismatch")],
+            [InlineKeyboardButton("❌ كود عملية خاطئ", callback_data=f"dep_adm|do_reject|{order_code}|wrong_code")],
+            [InlineKeyboardButton("❌ لم يصلنا أي مبلغ", callback_data=f"dep_adm|do_reject|{order_code}|not_received")],
+            [InlineKeyboardButton("🔙 تراجع", callback_data=f"dep_adm|back_to_main|{order_code}")]
+        ]
+        await query.edit_message_reply_markup(
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+    elif action == "do_reject":
+        reason_key = data[3]
+
+        # 1. تحديد نص السبب بناءً على المفتاح القادم من الزر
+        if reason_key == "mismatch":
+            reason_text = "المبلغ المحول غير مطابق للمبلغ المسجل في الطلب."
+        elif reason_key == "wrong_code":
+            reason_text = "كود العملية المرسل غير صحيح أو غير مكتمل."
+        elif reason_key == "not_received":
+            reason_text = "لم يصلنا أي إشعار بتحويل بهذا الكود حتى الآن."
+        else:
+            reason_text = "مخالفة شروط الإيداع."
+
+        # 2. تحديث قاعدة البيانات
+        update_order_status(
+            order_code,
+            "rejected",
+            rejection_reason=reason_text,
+            processed_by=query.from_user.id,
+        )
+        update_user_stats_after_transaction(
+            user_db["id"], 0, is_deposit=True, is_success=False
+        )
+
+        # 3. تعديل رسالة الإدارة لتوضيح أنه تم الرفض مع السبب
+        await query.edit_message_text(f"{query.message.text}\n\n🚫 تم الرفض بسبب: {reason_text}")
+
+        # 4. إرسال الإشعار اللبق للمستخدم
+        try:
+            user_msg = (
+                f"❌ <b>نعتذر منك، تم رفض طلب الإيداع (#{order_code})</b>\n\n"
+                f"📝 <b>السبب:</b> {reason_text}\n"
+                f"💡 يرجى التأكد من بيانات التحويل وإعادة المحاولة بطلب جديد."
+            )
+            await context.bot.send_message(
+                chat_id=user_db["telegram_id"],
+                text=user_msg,
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            logger.error(f"Failed to send rejection to user: {e}")
+
+
+
+async def cancel_deposit(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # بدلاً من الاستدعاء الدائري، نستخدم الرد المباشر
+    query = update.callback_query
+    if query:
+        await query.answer("تم الإلغاء")
+    return ConversationHandler.END
+
+
+# ==========================================
+# FILE: .\handlers\__init__.py
+# ==========================================
+
+
+
+# ==========================================
+# FILE: .\keyboards\main.py
+# ==========================================
+
+# keyboards/main.py
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+try:
+    from strings import BTN_BACK, BTN_MAIN_MENU
+except ImportError:
+    BTN_BACK = "🔙 رجوع"
+    BTN_MAIN_MENU = "🏠 القائمة الرئيسية"
+
+
+def main_menu_keyboard(user_role="user"):
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                "👤 إدارة الحساب (Game Account)", callback_data="main|account_manager"
+            )
+        ],
+        [
+            # هذا هو زر الإيداع الذي سنراقبه
+            InlineKeyboardButton(
+                "📥 إيداع للمحفظة (Bot Wallet)", callback_data="dep|start"
+            ),
+            InlineKeyboardButton(
+                "📤 سحب من المحفظة", callback_data="main|wallet_withdraw"
+            ),
+        ],
+        [
+            InlineKeyboardButton("🏆 نقاطي وتقييمي", callback_data="main|my_score"),
+        ],
+        [
+            InlineKeyboardButton("🔄 السجلات", callback_data="main|logs"),
+            InlineKeyboardButton("💬 الدعم الفني", callback_data="main|support"),
+        ],
+    ]
+    if user_role == "admin":
+        keyboard.append(
+            [InlineKeyboardButton("🔒 لوحة الإدارة", callback_data="admin|dashboard")]
+        )
+    return InlineKeyboardMarkup(keyboard)
+
+
+def back_nav_markup():
+    keyboard = [
+        [
+            InlineKeyboardButton(BTN_BACK, callback_data="nav|back"),
+            InlineKeyboardButton(BTN_MAIN_MENU, callback_data="nav|home"),
+        ]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+
+def back_only_markup(callback="nav|home"):
+    keyboard = [
+        [
+            InlineKeyboardButton(BTN_BACK, callback_data=callback)
+        ]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+
+def account_actions_markup(account_id):
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                "💰 شحن الحساب (من المحفظة)",
+                callback_data=f"act|deposit_game|{account_id}",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "💸 سحب من الحساب", callback_data=f"act|withdraw_game|{account_id}"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "🗑️ حذف الحساب (طلب)", callback_data=f"act|delete_req|{account_id}"
+            ),
+        ],
+        # -----------------------------------------------------------
+        # ✅ الإصلاح هنا: زر الرجوع يعود للقائمة الرئيسية (nav|home)
+        # بدلاً من العودة لنفس الصفحة (main|account_manager) مما يسبب الخطأ
+        # -----------------------------------------------------------
+        [InlineKeyboardButton("🔙 رجوع", callback_data="nav|home")],
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+
+def confirm_delete_markup(account_id):
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                "✅ نعم، احذف الحساب نهائياً",
+                callback_data=f"act|delete_confirm|{account_id}",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "❌ إلغاء", callback_data=f"act|cancel_del|{account_id}"
+            )
+        ],
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+
+# ==========================================
+# FILE: .\keyboards\__init__.py
+# ==========================================
+
+
+
+# ==========================================
+# FILE: .\services\generators.py
+# ==========================================
+
+# services/generators.py
+import string, random, time
+from config import ACCOUNT_PREFIX, ACCOUNT_SUFFIX
+
+
+def gen_short_token(length=4):
+    chars = string.ascii_lowercase + string.digits
+    return "".join(random.choice(chars) for _ in range(length))
+
+
+def generate_account_name(base_name, user_id):
+    # نأخذ حرفاً واحداً عشوائياً (كبير)
+    random_letter = random.choice(string.ascii_uppercase)
+    # نأخذ رقماً واحداً عشوائياً من 1 إلى 9
+    random_number = random.randint(1, 9)
+
+    # النتيجة ستكون: BaseName + RF + الحرف + الرقم
+    # مثال: HamzahRFA1
+    return f"MW{base_name}{random_letter}{random_number}"
+
+
+# ==========================================
+# FILE: .\services\notifications.py
+# ==========================================
+
+# services/notifications.py
+from telegram import InlineKeyboardMarkup, InlineKeyboardButton
+from telegram.constants import ParseMode
+from config import ADMIN_GROUP_ID
+from database.repository import get_account_by_id
+from strings import *
+from datetime import datetime
+
+async def post_order_to_admin_group(app, order_row, include_photo_file_id=None):
+    # 1. جلب تفاصيل الحساب المرتبط بالطلب
+    account_details = get_account_by_id(order_row['account_id'])
+    
+    # تجهيز البيانات للعرض
+    order_code = order_row['order_code']
+    service_type = order_row['service']
+    user_id = order_row['user_id']
+    
+    # إذا كان الطلب إنشاء حساب، نظهر الاسم والباسورد
+    account_info = ""
+    if account_details:
+        acc_name = account_details['account_name']
+        acc_pass = account_details['password']
+        account_info = (
+            f"👤 <b>اسم الحساب:</b> <code>{acc_name}</code>\n"
+            f"🔑 <b>كلمة المرور:</b> <code>{acc_pass}</code>\n"
+        )
+    
+    # المبلغ (إن وجد)
+    amount_info = ""
+    if order_row['amount']:
+        amount_info = f"💰 <b>المبلغ:</b> {order_row['amount']}\n"
+
+    # تجميع نص الرسالة
+    text = (
+        f"{ADMIN_NEW_ORDER_TITLE}\n\n"
+        f"📌 <b>كود الطلب:</b> <code>{order_code}</code>\n"
+        f"🧾 <b>النوع:</b> {service_type}\n"
+        f"🆔 <b>معرف المستخدم:</b> <code>{user_id}</code>\n"
+        f"------------------------\n"
+        f"{account_info}"
+        f"{amount_info}"
+        f"------------------------\n"
+        f"🕒 {datetime.utcnow().strftime('%Y-%m-%d %H:%M')}"
+    )
+
+    # الأزرار الجديدة (واضحة ومعربة)
+    keyboard = [
+        [
+            InlineKeyboardButton(ADMIN_BTN_CLAIM, callback_data=f"admin|claim|{order_code}"),
+        ],
+        [
+            InlineKeyboardButton(ADMIN_BTN_REJECT, callback_data=f"admin|reject|{order_code}")
+        ]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    # الإرسال
+    if include_photo_file_id:
+        msg = await app.bot.send_photo(
+            chat_id=ADMIN_GROUP_ID,
+            photo=include_photo_file_id,
+            caption=text,
+            reply_markup=reply_markup,
+            parse_mode=ParseMode.HTML
+        )
+    else:
+        msg = await app.bot.send_message(
+            chat_id=ADMIN_GROUP_ID,
+            text=text,
+            reply_markup=reply_markup,
+            parse_mode=ParseMode.HTML
+        )
+    
+    # (اختياري) ربط الرسالة بالكود في قاعدة البيانات إذا كنت تستخدم map_group_message
+    # map_group_message(msg.message_id, order_code) 
+
+
+# ==========================================
+# FILE: .\services\scoring.py
+# ==========================================
+
+# services/scoring.py
+from datetime import datetime
+from database.repository import (
+    get_user_by_id_helper,  # تأكد من أن هذه الدالة متاحة أو استخدم get_user_by_telegram وقم بتعديلها
+    get_user_archive_id,
+    set_user_archive_id,
+    get_bot_account_name,
+)
+from database.db import get_conn
+
+# ملاحظة: سنحتاج ARCHIVE_CHANNEL_ID من ملف config.py
+from config import USER_ARCHIVE_CHANNEL_ID
+
+# --- تعريف الرتب ---
+TIERS = {
+    "GUEST": {"name": "زائر ⚪️", "min_score": -9999, "color": "#B0B0B0", "stars": "⭐"},
+    "ACTIVE": {
+        "name": "عضو نشيط 🔵",
+        "min_score": 50,
+        "color": "#0000FF",
+        "stars": "⭐⭐",
+    },
+    "TRUSTED": {
+        "name": "موثوق 🟢",
+        "min_score": 300,
+        "color": "#008000",
+        "stars": "⭐⭐⭐",
+    },
+    "VIP": {
+        "name": "VIP 🟠",
+        "min_score": 1000,
+        "color": "#FFA500",
+        "stars": "⭐⭐⭐⭐",
+    },
+    "KING": {
+        "name": "الملك 🟣",
+        "min_score": 5000,
+        "color": "#800080",
+        "stars": "⭐⭐⭐⭐⭐",
+    },
+}
+
+
+def calculate_user_score(user_data):
+    """
+    معادلة حساب التقييم:
+    Score = (Success * 10) + (Money / 50k) + (Age * 2) - (Reject * 50) - (Incomplete * 2)
+    """
+    success = user_data["total_successful_orders"] or 0
+    rejected = user_data["total_rejected_orders"] or 0
+    incomplete = user_data["total_incomplete_orders"] or 0
+
+    total_money = (user_data["total_deposit_amount"] or 0) + (
+        user_data["total_withdraw_amount"] or 0
+    )
+
+    # حساب العمر بالأشهر
+    try:
+        created_at = datetime.fromisoformat(user_data["created_at"])
+        months_old = (datetime.utcnow() - created_at).days // 30
+    except:
+        months_old = 0
+
+    score = (
+        (success * 10)
+        + (total_money / 50000)
+        + (months_old * 2)
+        - (rejected * 50)
+        - (incomplete * 2)
+    )
+
+    return int(score)
+
+
+def get_user_tier_info(score):
+    """تحديد الرتبة بناءً على النقاط"""
+    current_tier = TIERS["GUEST"]
+    for key, tier in TIERS.items():
+        if score >= tier["min_score"]:
+            current_tier = tier
+    return current_tier
+
+
+def generate_card_text(user_data, score, tier_info):
+    """توليد نص بطاقة الأرشيف"""
+
+    user_link = f"<a href='tg://user?id={user_data['telegram_id']}'>{user_data['first_name']}</a>"
+    bot_username = get_bot_account_name(user_data["id"]) or "غير معرف"
+
+    # تنسيق المبالغ
+    dep = (
+        f"{user_data['total_deposit_amount']:,.0f}"
+        if user_data["total_deposit_amount"]
+        else "0"
+    )
+    withd = (
+        f"{user_data['total_withdraw_amount']:,.0f}"
+        if user_data["total_withdraw_amount"]
+        else "0"
+    )
+
+    text = (
+        f"🆔 <b>ID:</b> <code>{user_data['telegram_id']}</code>\n"
+        f"👤 <b>اسم المستخدم:</b> {user_link}\n"
+        f"<b>🔐اسم الحساب : </b><code>{bot_username}</code>\n"
+        f"📅 <b>تاريخ الانضمام:</b> {user_data['created_at'][:10]}\n"
+        f"🎖 <b>الرتبة:</b> {tier_info['name']}\n"
+        f"{tier_info['stars']} (Points: {score})\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"📊 <b>سجل العمليات:</b>\n"
+        f"• ✅ عمليات ناجحة: <b>{user_data['total_successful_orders']}</b>\n"
+        f"• ❌ عمليات مرفوضة: <b>{user_data['total_rejected_orders']}</b>\n"
+        f"• ⚠️ غير مكتملة: <b>{user_data['total_incomplete_orders']}</b>\n\n"
+        f"💰 <b>التدفق المالي:</b>\n"
+        f"• 📥 مجموع الإيداع: <b>{dep}</b> SYP\n"
+        f"• 📤 مجموع السحب: <b>{withd}</b> SYP\n\n"
+        f"🔄 <b>آخر تحديث:</b> {datetime.utcnow().strftime('%Y-%m-%d %H:%M')}"
+    )
+    return text
+
+
+async def update_live_card(bot, user_id_db):
+    """
+    الدالة الرئيسية التي تستدعى بعد كل عملية لتحديث البطاقة في القناة
+    """
+    # جلب بيانات المستخدم المحدثة
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM users WHERE id=?", (user_id_db,))
+    user_data = cur.fetchone()
+    conn.close()
+
+    if not user_data:
+        return
+
+    score = calculate_user_score(user_data)
+    tier = get_user_tier_info(score)
+    text = generate_card_text(user_data, score, tier)
+
+    archive_msg_id = user_data["archive_message_id"]
+
+    try:
+        if archive_msg_id:
+            try:
+                # محاولة تعديل الرسالة الموجودة
+                await bot.edit_message_text(
+                    chat_id=USER_ARCHIVE_CHANNEL_ID,
+                    message_id=archive_msg_id,
+                    text=text,
+                    parse_mode="HTML",
+                )
+                print(f"✅ تم تحديث بطاقة الأرشيف للمستخدم {user_id_db}")
+            except Exception as e:
+                # إذا فشل التعديل (مثلاً الرسالة حذفت)، نرسل واحدة جديدة
+                print(f"⚠️ فشل التعديل، جاري إرسال بطاقة جديدة: {e}")
+                msg = await bot.send_message(
+                    chat_id=USER_ARCHIVE_CHANNEL_ID, text=text, parse_mode="HTML"
+                )
+                set_user_archive_id(user_id_db, msg.message_id)
+        else:
+            # إرسال رسالة جديدة لأول مرة
+            msg = await bot.send_message(
+                chat_id=USER_ARCHIVE_CHANNEL_ID, text=text, parse_mode="HTML"
+            )
+            set_user_archive_id(user_id_db, msg.message_id)
+            print(f"🆕 تم إنشاء بطاقة أرشيف جديدة للمستخدم {user_id_db}")
+
+    except Exception as e:
+        # هنا يطبع الخطأ الحقيقي (مثل: Chat not found أو Need admin rights)
+        print(f"❌ خطأ فادح في نظام الأرشيف: {e}")
+
+
+def get_archive_link(user_data):
+    """توليد رابط مباشر لرسالة المستخدم في قناة الارشيف"""
+
+    try:
+        msg_id = user_data["archive_message_id"]
+        if msg_id:
+            USER_ARCHIVE_CHANNEL_ID
+            # تحويل آيدي القناة لشكل رابط (حذف -100 من البداية إذا وجدت)
+            channel_id_str = str(USER_ARCHIVE_CHANNEL_ID).replace("-100", "")
+            return f"https://t.me/c/{channel_id_str}/{msg_id}"
+    except (IndexError, KeyError, TypeError):
+        pass
+    return None
+
+
+def get_user_score_details_text(user_data):
+    """نص رسالة (نقاطي) التي تظهر للمستخدم"""
+    score = calculate_user_score(user_data)
+    tier = get_user_tier_info(score)
+
+    next_tier = None
+    points_needed = 0
+
+    # البحث عن الرتبة التالية
+    sorted_tiers = sorted(TIERS.values(), key=lambda x: x["min_score"])
+    for t in sorted_tiers:
+        if t["min_score"] > score:
+            next_tier = t
+            points_needed = t["min_score"] - score
+            break
+
+    text = (
+        f"🏆 <b>لوحة التقييم الشخصي</b>\n\n"
+        f"🔰 <b>رتبتك الحالية:</b> {tier['name']}\n"
+        f"⭐️ <b>النجوم:</b> {tier['stars']}\n"
+        f"💎 <b>نقاطك:</b> <code>{score}</code> نقطة\n"
+        f"━━━━━━━━━━━━━━\n"
+    )
+
+    if next_tier:
+        text += (
+            f"🚀 <b>الهدف القادم:</b> {next_tier['name']}\n"
+            f"💡 تحتاج <b>{points_needed}</b> نقطة للترقية.\n"
+        )
+    else:
+        text += "👑 <b>أنت في قمة المجد!</b>\n"
+
+    text += (
+        f"\n📊 <b>إحصائياتك:</b>\n"
+        f"✅ عمليات ناجحة: {user_data['total_successful_orders']}\n"
+        f"❌ عمليات مرفوضة: {user_data['total_rejected_orders']}"
+    )
+
+    return text
+
+
+# ==========================================
+# FILE: .\services\__init__.py
+# ==========================================
+
+
+
+# ==========================================
+# FILE: .\utils\cleaner.py
+# ==========================================
+
+# utils/cleaner.py
+async def safe_delete(message):
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+
+# ==========================================
+# FILE: .\utils\__init__.py
+# ==========================================
+

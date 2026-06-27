@@ -11,7 +11,7 @@ from telegram.ext import (
     filters,
     TypeHandler,  # نحتاجه للتتبع
 )
-from config import TOKEN
+from config import TOKEN, ADMIN_IDS
 from database.db import init_db
 from database.repository import seed_payment_methods
 
@@ -26,6 +26,19 @@ from handlers.wallet import (
     admin_deposit_decision,
     WAIT_AMOUNT,
     WAIT_CODE,
+)
+
+from handlers.withdraw import (
+    start_withdraw,
+    wd_receive_amount,
+    wd_select_method,
+    wd_receive_destination,
+    cancel_withdraw,
+    admin_withdraw_decision,
+    admin_receive_withdraw_code,
+    WD_WAIT_AMOUNT,
+    WD_WAIT_METHOD,
+    WD_WAIT_DESTINATION,
 )
 from handlers.main_menu import register_main_menu_handlers
 from handlers.account import register_account_handlers
@@ -92,10 +105,41 @@ def main():
     )
     app.add_handler(deposit_conv)
 
+    withdraw_conv = ConversationHandler(
+        entry_points=[
+            CallbackQueryHandler(start_withdraw, pattern=r"^wd\|start")
+        ],
+        states={
+            WD_WAIT_AMOUNT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, wd_receive_amount)
+            ],
+            WD_WAIT_METHOD: [
+                CallbackQueryHandler(wd_select_method, pattern=r"^wdpay\|")
+            ],
+            WD_WAIT_DESTINATION: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, wd_receive_destination)
+            ],
+        },
+        fallbacks=[
+            CallbackQueryHandler(nav_handler, pattern=r"^nav\|home$"),
+            CommandHandler("start", start),
+        ],
+        allow_reentry=True,
+    )
+    app.add_handler(withdraw_conv)
+
     # 3. بقية الهاندلرز
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(select_payment_method, pattern=r"^pay\|"))
     app.add_handler(CallbackQueryHandler(admin_deposit_decision, pattern=r"^dep_adm\|"))
+    app.add_handler(CallbackQueryHandler(admin_withdraw_decision, pattern=r"^wd_adm\|"))
+    app.add_handler(
+        MessageHandler(
+            filters.TEXT & ~filters.COMMAND & filters.User(user_id=ADMIN_IDS),
+            admin_receive_withdraw_code,
+        ),
+        group=1,
+    )
 
     register_main_menu_handlers(app)
     register_account_handlers(app)

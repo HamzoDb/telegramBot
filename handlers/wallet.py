@@ -85,8 +85,8 @@ async def receive_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 1. حذف رسالة المستخدم فوراً (تنظيف)
     try:
         await update.message.delete()
-    except:
-        pass
+    except Exception as e:
+        logger.error(f"خطأ في تعديل رسالة المبلغ : {e}")
 
     # 2. التحقق: هل النص أرقام فقط؟
     if not text.isdigit():
@@ -278,15 +278,18 @@ async def receive_transaction_code(update: Update, context: ContextTypes.DEFAULT
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
+    try:
+        await context.bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=msg_id,
+            text="✅ <b>تم استلام طلبك بنجاح!</b>\nسيتم إشعارك فور معالجة الطلب من قبل الإدارة.",
+            parse_mode="HTML",
+        )
 
-    await context.bot.edit_message_text(
-        chat_id=chat_id,
-        message_id=msg_id,
-        text="✅ <b>تم استلام طلبك بنجاح!</b>\nسيتم إشعارك فور معالجة الطلب من قبل الإدارة.",
-        parse_mode="HTML",
-    )
+    except Exception as e:
+        logger.error(f"خطأ في ارسال تأكيد ايداع المستخدم {chat_id}: {e}")
+
     await add_to_stack(context, msg_id)
-
     return ConversationHandler.END
 
 
@@ -333,7 +336,7 @@ async def admin_deposit_decision(update: Update, context: ContextTypes.DEFAULT_T
             try:
                 await context.bot.delete_message(chat_id=user_id_tg, message_id=old_msg_id)
             except Exception as e:
-                logging.error(f"Error deleting old deposit msg: {e}")
+                logger.error(f"خطأ في حذف رسالة الإيداع القديمة: {e}")
 
         # 4. إرسال رسالة النجاح للمستخدم
         sent_msg = await context.bot.send_message(

@@ -21,7 +21,7 @@ def main_menu_keyboard(user_role="user"):
                 "📥 إيداع للمحفظة (Bot Wallet)", callback_data="dep|start"
             ),
             InlineKeyboardButton(
-                "📤 سحب من المحفظة", callback_data="main|wallet_withdraw"
+                "📤 سحب من المحفظة", callback_data="wd|start"
             ),
         ],
         [

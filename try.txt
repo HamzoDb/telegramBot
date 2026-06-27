@@ -1,0 +1,31 @@
+conn = get_conn()
+    cur = conn.cursor()
+    now = datetime.utcnow()
+    timestamp = now.strftime("%Y%m%d%H%M%S")
+    try:
+        cur.execute(
+            "INSERT INTO orders (order_code, transaction_code, user_id, account_id, service, amount, data, proof_file_id, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                None,
+                transaction_code,
+                user_id,
+                account_id,
+                service,
+                amount,
+                data,
+                proof_file_id,
+                "pending",
+                now.isoformat(),
+                now.isoformat(),
+            ),
+        )
+        oid = cur.lastrowid
+        code = f"REQ-{timestamp}-{oid}"
+        cur.execute("UPDATE orders SET order_code=? WHERE id=?", (code, oid))
+        conn.commit()
+        return get_order_by_code(code)
+    except sqlite3.IntegrityError:
+        conn.rollback()
+        return None
+    finally:
+        conn.close()
