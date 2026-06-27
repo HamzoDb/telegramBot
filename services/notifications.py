@@ -1,7 +1,7 @@
 # services/notifications.py
 from telegram import InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.constants import ParseMode
-from config import ADMIN_GROUP_ID
+from config import MONITORING_GROUP_ID
 from database.repository import get_account_by_id
 from strings import *
 from datetime import datetime
@@ -9,12 +9,12 @@ from datetime import datetime
 async def post_order_to_admin_group(app, order_row, include_photo_file_id=None):
     # 1. جلب تفاصيل الحساب المرتبط بالطلب
     account_details = get_account_by_id(order_row['account_id'])
-    
+
     # تجهيز البيانات للعرض
     order_code = order_row['order_code']
     service_type = order_row['service']
     user_id = order_row['user_id']
-    
+
     # إذا كان الطلب إنشاء حساب، نظهر الاسم والباسورد
     account_info = ""
     if account_details:
@@ -24,7 +24,7 @@ async def post_order_to_admin_group(app, order_row, include_photo_file_id=None):
             f"👤 <b>اسم الحساب:</b> <code>{acc_name}</code>\n"
             f"🔑 <b>كلمة المرور:</b> <code>{acc_pass}</code>\n"
         )
-    
+
     # المبلغ (إن وجد)
     amount_info = ""
     if order_row['amount']:
@@ -57,7 +57,7 @@ async def post_order_to_admin_group(app, order_row, include_photo_file_id=None):
     # الإرسال
     if include_photo_file_id:
         msg = await app.bot.send_photo(
-            chat_id=ADMIN_GROUP_ID,
+            chat_id=MONITORING_GROUP_ID,
             photo=include_photo_file_id,
             caption=text,
             reply_markup=reply_markup,
@@ -65,7 +65,7 @@ async def post_order_to_admin_group(app, order_row, include_photo_file_id=None):
         )
     else:
         msg = await app.bot.send_message(
-            chat_id=ADMIN_GROUP_ID,
+            chat_id=MONITORING_GROUP_ID,
             text=text,
             reply_markup=reply_markup,
             parse_mode=ParseMode.HTML

@@ -111,7 +111,19 @@ def init_db():
         order_code TEXT
     )"""
     )
-    
+
+    # 7. جدول الأدمنين (نظام التوزيع بالدور)
+    cur.execute(
+        """
+    CREATE TABLE IF NOT EXISTS admins (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        telegram_id INTEGER UNIQUE,
+        name TEXT,
+        group_id INTEGER,
+        turn_order INTEGER UNIQUE,
+        is_active INTEGER DEFAULT 1
+    )"""
+    )
 
     _migrate_tables(cur)
 
@@ -154,4 +166,40 @@ def _migrate_tables(cur):
     try:
         cur.execute("ALTER TABLE orders ADD COLUMN locked_by_admin_id INTEGER")
     except sqlite3.OperationalError:
+        pass
+
+    # عمود تتبع الأدمن المُعيَّن لكل طلب
+    try:
+        cur.execute("ALTER TABLE orders ADD COLUMN assigned_admin_id INTEGER")
+    except sqlite3.OperationalError:
+        pass
+
+    try:
+        cur.execute("ALTER TABLE orders ADD COLUMN monitoring_msg_id INTEGER")
+    except sqlite3.OperationalError:
+        pass
+
+    try:
+        cur.execute("ALTER TABLE orders ADD COLUMN original_text TEXT")
+    except sqlite3.OperationalError:
+        pass
+
+    try:
+        cur.execute("ALTER TABLE orders ADD COLUMN admin_msg_id INTEGER")
+    except sqlite3.OperationalError:
+        pass
+
+    # إدراج الأدمنين الافتراضيين إن لم يكونوا موجودين
+    try:
+        cur.execute("SELECT COUNT(*) FROM admins")
+        if cur.fetchone()[0] == 0:
+            cur.executemany(
+                "INSERT INTO admins (telegram_id, name, group_id, turn_order) VALUES (?, ?, ?, ?)",
+                [
+                    (1364052998, "حمزة", -1004344777179, 1),
+                    (6442088165, "مضر",  -1004401028822, 2),
+                    (7369432267, "محسن", -1004416875868, 3),
+                ]
+            )
+    except Exception:
         pass

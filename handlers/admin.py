@@ -232,8 +232,49 @@ async def admin_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def register_admin_handlers(app):
-    app.add_handler(CallbackQueryHandler(admin_cb, pattern="^admin\|"))
+    app.add_handler(CallbackQueryHandler(admin_cb, pattern=r"^adm\|"))
+    app.add_handler(CallbackQueryHandler(monitoring_skip_cb, pattern=r"^mon\|skip\|"))
     app.add_handler(CommandHandler("broadcast", broadcast_command))
     app.add_handler(CommandHandler("dm", dm_command))
     app.add_handler(CommandHandler("set_syriatel", set_payment_number_command))
     app.add_handler(CommandHandler("set_sham", set_payment_number_command))
+
+
+async def monitoring_skip_cb(update, context):
+    query = update.callback_query
+    from database.repository import get_admin_by_telegram_id
+    admin = get_admin_by_telegram_id(query.from_user.id)
+    if not admin:
+        await query.answer("⛔ ليس لديك صلاحية.", show_alert=True)
+        return
+
+    data = query.data.split("|")
+    order_code = data[2]
+
+    from database.repository import get_order_by_code
+    order = get_order_by_code(order_code)
+    if not order or order["status"] not in ("pending", "processing"):
+        await query.answer("⚠️ تم التعامل مع هذا الطلب مسبقاً.")
+        return
+
+    from services.admin_router import skip_order_to_next_admin
+    next_admin = await skip_order_to_next_admin(
+        context.bot, order_code, query.message.message_id
+    )
+
+    if next_admin:
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+        await query.edit_message_text(
+            query.message.text
+            + f"\n\n⏭️ تم التحويل لـ: {next_admin['name']}",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(
+                    "⏭️ تخطي مرة أخرى",
+                    callback_data=f"mon|skip|{order_code}"
+                )]
+            ]),
+        )
+        await query.answer(f"✅ تم التحويل لـ {next_admin['name']}")
+    else:
+        await query.answer("⚠️ فشل التحويل، لا يوجد أدمن آخر متاح.", show_alert=True)

@@ -18,13 +18,14 @@ from database.repository import (
 )
 from handlers.navigation import add_to_stack
 from database.db import get_conn
-from config import DEPOSITS_GROUP_ID, ADMIN_IDS
+from config import ADMIN_IDS
 from services.scoring import (
     calculate_user_score,
     get_user_tier_info,
     update_live_card,
     get_archive_link,
 )
+from services.admin_router import route_order_to_admin
 from keyboards.main import back_only_markup
 
 # إعداد السجلات للتتبع
@@ -261,23 +262,10 @@ async def receive_transaction_code(update: Update, context: ContextTypes.DEFAULT
         f"🔢 <b>الكود:</b> <code>{user_code}</code>\n"
     )
 
-    keyboard = [
-        [
-            InlineKeyboardButton(
-                "✅ قبول", callback_data=f"dep_adm|approve|{order['order_code']}"
-            ),
-            InlineKeyboardButton(
-                "❌ رفض", callback_data=f"dep_adm|reject_menu|{order['order_code']}"
-            ),
-        ]
-    ]
+    assigned_admin = await route_order_to_admin(context.bot, order, admin_text)
+    if not assigned_admin:
+        logger.error(f"فشل توزيع طلب الإيداع {order['order_code']} على أي أدمن")
 
-    await context.bot.send_message(
-        chat_id=DEPOSITS_GROUP_ID,
-        text=admin_text,
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-    )
     try:
         await context.bot.edit_message_text(
             chat_id=chat_id,
@@ -295,7 +283,8 @@ async def receive_transaction_code(update: Update, context: ContextTypes.DEFAULT
 
 async def admin_deposit_decision(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    if query.from_user.id not in ADMIN_IDS:
+    from database.repository import get_admin_by_telegram_id
+    if not get_admin_by_telegram_id(query.from_user.id):
         return
 
     data = query.data.split("|")

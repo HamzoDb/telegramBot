@@ -531,3 +531,166 @@ def get_bot_account_name(user_id):
     cur.execute("SELECT account_name From accounts WHERE user_id=? LIMIT 1", (user_id,))
     res = cur.fetchone()
     return res["account_name"] if res else None
+
+
+# --- Admin Router ---
+def get_all_active_admins():
+    """جلب كل الأدمنين النشطين مرتبين حسب الدور"""
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT * FROM admins WHERE is_active=1 ORDER BY turn_order ASC"
+    )
+    rows = cur.fetchall()
+    conn.close()
+    return rows
+
+
+def get_next_admin_in_turn():
+    """
+    جلب الأدمن التالي في الدورة.
+    يعتمد على عمود assigned_admin_id في orders:
+    يجلب الأدمن الذي لم يستلم آخر طلب.
+    """
+    conn = get_conn()
+    cur = conn.cursor()
+
+    # جلب آخر طلب تم توزيعه
+    cur.execute(
+        "SELECT assigned_admin_id FROM orders "
+        "WHERE assigned_admin_id IS NOT NULL "
+        "ORDER BY id DESC LIMIT 1"
+    )
+    last = cur.fetchone()
+
+    admins = get_all_active_admins()
+    if not admins:
+        conn.close()
+        return None
+
+    if not last:
+        # أول طلب، نبدأ بالأول
+        conn.close()
+        return admins[0]
+
+    last_admin_id = last["assigned_admin_id"]
+
+    # نجد موضع الأدمن الأخير في القائمة
+    for i, admin in enumerate(admins):
+        if admin["telegram_id"] == last_admin_id:
+            next_index = (i + 1) % len(admins)
+            conn.close()
+            return admins[next_index]
+
+    # لو لم يُوجد (مثلاً حُذف الأدمن)، نبدأ من الأول
+    conn.close()
+    return admins[0]
+
+
+def get_admin_by_telegram_id(telegram_id):
+    """جلب بيانات أدمن بمعرف تيليجرام"""
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM admins WHERE telegram_id=?", (telegram_id,))
+    row = cur.fetchone()
+    conn.close()
+    return row
+
+
+def get_admin_by_group_id(group_id):
+    """جلب بيانات الأدمن المسؤول عن مجموعة معينة"""
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM admins WHERE group_id=?", (group_id,))
+    row = cur.fetchone()
+    conn.close()
+    return row
+
+
+def set_order_assigned_admin(order_code, admin_telegram_id):
+    """ربط الطلب بالأدمن المعيّن"""
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE orders SET assigned_admin_id=? WHERE order_code=?",
+        (admin_telegram_id, order_code),
+    )
+    conn.commit()
+    conn.close()
+
+
+def reassign_order_to_next_admin(order_code):
+    """
+    تحويل طلب لأدمن آخر (عند الضغط على زر التخطي).
+    يجلب الأدمن الحالي المعيّن للطلب، ثم يحول للتالي.
+    """
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT assigned_admin_id FROM orders WHERE order_code=?", (order_code,)
+    )
+    row = cur.fetchone()
+    conn.close()
+
+    if not row:
+        return None
+
+    admins = get_all_active_admins()
+    if not admins:
+        return None
+
+    current_id = row["assigned_admin_id"]
+    for i, admin in enumerate(admins):
+        if admin["telegram_id"] == current_id:
+            next_index = (i + 1) % len(admins)
+            next_admin = admins[next_index]
+            set_order_assigned_admin(order_code, next_admin["telegram_id"])
+            return next_admin
+
+    return admins[0]
+
+
+def set_order_monitoring_msg_id(order_code, message_id):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE orders SET monitoring_msg_id=? WHERE order_code=?",
+        (message_id, order_code),
+    )
+    conn.commit()
+    conn.close()
+
+
+def set_order_original_text(order_code, text, admin_msg_id=None):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE orders SET original_text=?, admin_msg_id=? WHERE order_code=?",
+        (text, admin_msg_id, order_code),
+    )
+    conn.commit()
+    conn.close()
+
+
+def has_pending_game_deposit(user_id):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT 1 FROM orders WHERE user_id=? AND status IN ('pending', 'processing') AND service='GAME_DEPOSIT'",
+        (user_id,),
+    )
+    res = cur.fetchone()
+    conn.close()
+    return True if res else False
+
+
+def has_pending_game_withdraw(user_id):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT 1 FROM orders WHERE user_id=? AND status IN ('pending', 'processing') AND service='GAME_WITHDRAW'",
+        (user_id,),
+    )
+    res = cur.fetchone()
+    conn.close()
+    return True if res else False

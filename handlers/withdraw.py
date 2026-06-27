@@ -15,13 +15,14 @@ from database.repository import (
     lock_order_for_admin,
 )
 from handlers.navigation import add_to_stack
-from config import WITHDRAWS_GROUP_ID, ADMIN_IDS
+from config import ADMIN_IDS
 from services.scoring import (
     calculate_user_score,
     get_user_tier_info,
     update_live_card,
     get_archive_link,
 )
+from services.admin_router import route_order_to_admin
 from keyboards.main import back_only_markup
 
 logger = logging.getLogger(__name__)
@@ -246,23 +247,9 @@ async def wd_receive_destination(update: Update, context: ContextTypes.DEFAULT_T
         f"📍 <b>وجهة التحويل:</b> <code>{user_input}</code>\n"
     )
 
-    keyboard = [
-        [
-            InlineKeyboardButton(
-                "✅ تم التحويل", callback_data=f"wd_adm|approve|{order['order_code']}"
-            ),
-            InlineKeyboardButton(
-                "❌ رفض", callback_data=f"wd_adm|reject_menu|{order['order_code']}"
-            ),
-        ]
-    ]
-
-    await context.bot.send_message(
-        chat_id=WITHDRAWS_GROUP_ID,
-        text=admin_text,
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-    )
+    assigned_admin = await route_order_to_admin(context.bot, order, admin_text)
+    if not assigned_admin:
+        logger.error(f"فشل توزيع طلب السحب {order['order_code']} على أي أدمن")
 
     try:
         await context.bot.edit_message_text(
@@ -291,7 +278,8 @@ async def cancel_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def admin_withdraw_decision(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    if query.from_user.id not in ADMIN_IDS:
+    from database.repository import get_admin_by_telegram_id
+    if not get_admin_by_telegram_id(query.from_user.id):
         return
 
     data = query.data.split("|")
@@ -320,14 +308,46 @@ async def admin_withdraw_decision(update: Update, context: ContextTypes.DEFAULT_
             "admin_msg_text": query.message.text,
         }
         await query.answer()
-        await context.bot.send_message(
-            chat_id=query.from_user.id,
-            text=f"✏️ أرسل الآن كود عملية التحويل للطلب #{order_code} (رد بنص فقط):",
-        )
+        await query.answer()
+        from database.repository import get_admin_by_telegram_id
+        admin_info = get_admin_by_telegram_id(query.from_user.id)
+        if admin_info:
+            try:
+                await context.bot.send_message(
+                    chat_id=admin_info["group_id"],
+                    text=(
+                        f"🔐 <b>مطلوب كود التحويل</b>\n"
+                        f"━━━━━━━━━━━━━━\n"
+                        f"الطلب: <code>{order_code}</code>\n\n"
+                        f"أرسل الآن كود عملية التحويل في هذه المجموعة:"
+                    ),
+                    parse_mode="HTML",
+                )
+            except Exception as e:
+                logger.error(f"خطأ في إرسال طلب الكود للمجموعة: {e}")
         try:
             await query.edit_message_reply_markup(reply_markup=None)
         except Exception as e:
             logger.error(f"خطأ في إزالة أزرار الطلب المقفول: {e}")
+
+            
+        # تحديث رسالة الاستعلامات فوراً
+        from database.repository import get_admin_by_telegram_id as _get_adm
+        from services.admin_router import update_monitoring_message
+        _admin = _get_adm(query.from_user.id)
+        _fresh_order = get_order_by_code(order_code)
+        if _fresh_order and _fresh_order["monitoring_msg_id"]:
+            _new_text = (
+                query.message.text +
+                f"\n━━━━━━━━━━━━━━\n"
+                f"📌 <b>مُعيَّن لـ:</b> {_admin['name'] if _admin else 'أدمن'}\n"
+                f"📊 <b>الحالة:</b> 🔄 جاري التحويل"
+            )
+            await update_monitoring_message(
+                context.bot,
+                _fresh_order["monitoring_msg_id"],
+                _new_text,
+            )
 
     elif action == "reject_menu":
         keyboard = [
@@ -397,16 +417,19 @@ async def admin_receive_withdraw_code(update: Update, context: ContextTypes.DEFA
     )
     await update_live_card(context.bot, user_db["id"])
 
-    try:
-        await context.bot.edit_message_text(
-            chat_id=WITHDRAWS_GROUP_ID,
-            message_id=info["admin_msg_id"],
-            text=info["admin_msg_text"]
-            + f"\n\n✅ تم التحويل بواسطة: {update.effective_user.first_name}"
-            + f"\n🔢 كود العملية: {transfer_code}",
-        )
-    except Exception as e:
-        logger.error(f"خطأ في تحديث رسالة الإدارة بعد إدخال كود السحب: {e}")
+    from database.repository import get_admin_by_telegram_id
+    admin_info = get_admin_by_telegram_id(admin_id)
+    if admin_info:
+        try:
+            await context.bot.edit_message_text(
+                chat_id=admin_info["group_id"],
+                message_id=info["admin_msg_id"],
+                text=info["admin_msg_text"]
+                + f"\n\n✅ تم التحويل بواسطة: {update.effective_user.first_name}"
+                + f"\n🔢 كود العملية: {transfer_code}",
+            )
+        except Exception as e:
+            logger.error(f"خطأ في تحديث رسالة مجموعة الأدمن بعد إدخال كود السحب: {e}")
 
     try:
         await context.bot.send_message(

@@ -10,25 +10,14 @@ if not TOKEN:
 
 MIN_DEPOSIT_AMOUNT = 25000
 
-# المجموعات الإدارية
-ADMIN_GROUP_ID = int(os.getenv("ADMIN_GROUP_ID") or -1001234567890)
-DEPOSITS_GROUP_ID = int(
-    os.getenv("DEPOSITS_GROUP_ID") or -1001234567890
-)  # مجموعة الإيداعات
-WITHDRAWS_GROUP_ID = int(os.getenv("WITHDRAWS_GROUP_ID") or -1001234567890)
+# قناة أرشيف المستخدمين (تبقى كما هي)
+USER_ARCHIVE_CHANNEL_ID = int(os.getenv("USER_ARCHIVE_CHANNEL_ID") or 0)
 
-# قنوات التوثيق والأرشيف (الجديدة)
-ACCEPTED_LOG_CHANNEL_ID = int(
-    os.getenv("ACCEPTED_LOG_CHANNEL_ID") or 0
-)  # قناة الطلبات المقبولة
-REJECTED_LOG_CHANNEL_ID = int(
-    os.getenv("REJECTED_LOG_CHANNEL_ID") or 0
-)  # قناة الطلبات المرفوضة
-USER_ARCHIVE_CHANNEL_ID = int(
-    os.getenv("USER_ARCHIVE_CHANNEL_ID") or 0
-)  # قناة أرشيف المستخدمين
+# المجموعة المركزية للاستعلامات (تبقى في env)
+MONITORING_GROUP_ID = int(os.getenv("MONITORING_GROUP_ID") or -1001999999999)
 
-# ADMIN_IDS: comma separated list of integer telegram IDs
+# ADMIN_IDS: تُجلب من قاعدة البيانات في النظام الجديد
+# هذا السطر مؤقت للتوافق مع الكود القديم، سيُحذف في الخطوة 7
 ADMIN_IDS = [
     int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip().isdigit()
 ]

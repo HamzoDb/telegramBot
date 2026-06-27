@@ -58,9 +58,10 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 
 # --- دالة التتبع الجديدة ---
 async def debug_sniffer(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """تطبع أي زر يتم ضغطه في التيرمنال للتأكد من وصوله"""
     if update.callback_query:
-        print(f"🕵️ DEBUG: Button Clicked -> {update.callback_query.data}")
+        print(f"🕵️ DEBUG: Button -> {update.callback_query.data}")
+    if update.message and update.message.chat.type in ["group", "supergroup"]:
+        print(f"🏠 GROUP ID: {update.message.chat.id} | Name: {update.message.chat.title}")
 
 
 async def post_init(application):
@@ -133,9 +134,11 @@ def main():
     app.add_handler(CallbackQueryHandler(select_payment_method, pattern=r"^pay\|"))
     app.add_handler(CallbackQueryHandler(admin_deposit_decision, pattern=r"^dep_adm\|"))
     app.add_handler(CallbackQueryHandler(admin_withdraw_decision, pattern=r"^wd_adm\|"))
+    from database.repository import get_all_active_admins
+    admin_ids_from_db = [a["telegram_id"] for a in get_all_active_admins()]
     app.add_handler(
         MessageHandler(
-            filters.TEXT & ~filters.COMMAND & filters.User(user_id=ADMIN_IDS),
+            filters.TEXT & ~filters.COMMAND & filters.User(user_id=admin_ids_from_db),
             admin_receive_withdraw_code,
         ),
         group=1,
