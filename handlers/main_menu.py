@@ -155,4 +155,9 @@ async def main_menu_cb(update, context):
 
 
 def register_main_menu_handlers(app):
-    app.add_handler(CallbackQueryHandler(main_menu_cb, pattern=r"^(main|act)\|"))
+    app.add_handler(
+        CallbackQueryHandler(
+            main_menu_cb,
+            pattern=r"^(main|act)\|(?!deposit_game|withdraw_game)"
+        )
+    )

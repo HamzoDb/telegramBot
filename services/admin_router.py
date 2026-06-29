@@ -35,13 +35,16 @@ async def route_order_to_admin(bot, order, request_text):
 
     if service == "WALLET_DEPOSIT":
         action_approve = f"dep_adm|approve|{order['order_code']}"
-        action_reject  = f"dep_adm|reject_menu|{order['order_code']}"
+        action_reject = f"dep_adm|reject_menu|{order['order_code']}"
     elif service == "WALLET_WITHDRAW":
         action_approve = f"wd_adm|approve|{order['order_code']}"
-        action_reject  = f"wd_adm|reject_menu|{order['order_code']}"
+        action_reject = f"wd_adm|reject_menu|{order['order_code']}"
+    elif service in ("GAME_DEPOSIT", "GAME_WITHDRAW"):
+        action_approve = f"adm_game|approve|{order['order_code']}"
+        action_reject = f"adm_game|reject_menu|{order['order_code']}"
     else:
-        action_approve = f"adm|approve|{order['order_code']}"
-        action_reject  = f"adm|reject|{order['order_code']}"
+        action_approve = f"admin|claim|{order['order_code']}"
+        action_reject = f"admin|reject|{order['order_code']}"
 
     admin_keyboard = InlineKeyboardMarkup([
         [
@@ -134,13 +137,16 @@ async def skip_order_to_next_admin(bot, order_code, current_monitoring_msg_id):
     service = current_order["service"]
     if service == "WALLET_DEPOSIT":
         action_approve = f"dep_adm|approve|{order_code}"
-        action_reject  = f"dep_adm|reject_menu|{order_code}"
+        action_reject = f"dep_adm|reject_menu|{order_code}"
     elif service == "WALLET_WITHDRAW":
         action_approve = f"wd_adm|approve|{order_code}"
-        action_reject  = f"wd_adm|reject_menu|{order_code}"
+        action_reject = f"wd_adm|reject_menu|{order_code}"
+    elif service in ("GAME_DEPOSIT", "GAME_WITHDRAW"):
+        action_approve = f"adm_game|approve|{order_code}"
+        action_reject = f"adm_game|reject_menu|{order_code}"
     else:
-        action_approve = f"adm|approve|{order_code}"
-        action_reject  = f"adm|reject|{order_code}"
+        action_approve = f"admin|approve|{order_code}"
+        action_reject = f"admin|reject|{order_code}"
 
     admin_keyboard = InlineKeyboardMarkup([
         [

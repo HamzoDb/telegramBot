@@ -44,6 +44,7 @@ from handlers.main_menu import register_main_menu_handlers
 from handlers.account import register_account_handlers
 from handlers.deposit_withdraw import register_deposit_withdraw_handlers
 from handlers.admin import register_admin_handlers
+from handlers.game_account import register_game_account_handlers
 from handlers.navigation import register_navigation_handlers, nav_handler
 
 logging.basicConfig(
@@ -145,6 +146,7 @@ def main():
     )
 
     register_main_menu_handlers(app)
+    register_game_account_handlers(app)
     register_account_handlers(app)
     register_deposit_withdraw_handlers(app)
     register_admin_handlers(app)

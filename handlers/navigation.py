@@ -17,7 +17,7 @@ async def nav_handler(update, context):
     except Exception:
         pass
 
-    await clear_stack(update, context)
+    # نحذف Stack بعد التعديل وليس قبله
 
     try:
         action = data.split("|")[1]
@@ -50,18 +50,30 @@ async def nav_handler(update, context):
     # ✅ الإصلاح: تجاهل خطأ "Message is not modified" تماماً
     # -------------------------------------------------------
     try:
-        await query.edit_message_text(
+        edited = await query.edit_message_text(
             text=welcome_text,
             reply_markup=main_menu_keyboard(user_role),
             parse_mode="HTML",
         )
+        context.user_data["last_menu_msg_id"] = edited.message_id
     except BadRequest as e:
         if "Message is not modified" in str(e):
-            # المستخدم ضغط رجوع وهو أصلاً في القائمة، لا تفعل شيئاً ولا تطبع خطأ
             pass
+        elif "Message to edit not found" in str(e):
+            sent = await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text=welcome_text,
+                reply_markup=main_menu_keyboard(user_role),
+                parse_mode="HTML",
+            )
+            # نمسح الـ stack قبل إضافة الرسالة الجديدة لمنع حذفها
+            context.user_data["msg_stack"] = []
+            context.user_data["last_menu_msg_id"] = sent.message_id
+            return
         else:
-            # إذا كان خطأ آخر حقيقي، اطبعه
             print(f"Error in navigation: {e}")
+
+    await clear_stack(update, context)
 
 
 def register_navigation_handlers(app):
@@ -76,10 +88,14 @@ async def add_to_stack(context, msg_id):
 
 
 async def clear_stack(update, context):
-    """تشغيل المكنسةوحذف كل ما تم تسجيله"""
+    """تشغيل المكنسة وحذف كل ما تم تسجيله، مع استثناء رسالة القائمة الرئيسية"""
     chat_id = update.effective_chat.id
     stack = context.user_data.get("msg_stack", [])
+    protected_id = context.user_data.get("last_menu_msg_id")
+
     for m_id in stack:
+        if m_id == protected_id:
+            continue
         try:
             await context.bot.delete_message(chat_id=chat_id, message_id=m_id)
         except Exception:

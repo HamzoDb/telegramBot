@@ -694,3 +694,18 @@ def has_pending_game_withdraw(user_id):
     res = cur.fetchone()
     conn.close()
     return True if res else False
+
+
+def delete_account_by_id(account_id):
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute("DELETE FROM accounts WHERE id=?", (account_id,))
+        conn.commit()
+        return True
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).error(f"خطأ في حذف الحساب: {e}")
+        return False
+    finally:
+        conn.close()

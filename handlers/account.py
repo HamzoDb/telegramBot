@@ -2,6 +2,7 @@
 import asyncio
 import re
 import logging
+from telegram.error import BadRequest
 from telegram.ext import MessageHandler, filters
 from telegram.constants import ParseMode
 from strings import *
@@ -12,11 +13,13 @@ from database.repository import (
     set_user_state,
 )
 from keyboards.main import back_nav_markup, back_only_markup, main_menu_keyboard
-from services.notifications import post_order_to_admin_group
+from services.admin_router import route_order_to_admin
+from services.scoring import calculate_user_score, get_user_tier_info, get_archive_link
 from services.generators import generate_account_name
-from services.scoring import update_live_card
 from handlers.navigation import add_to_stack, clear_stack
 from config import ADMIN_IDS
+
+logger = logging.getLogger(__name__)
 
 
 async def account_manager_handler(update, context):
@@ -43,11 +46,20 @@ async def account_manager_handler(update, context):
     if state == "CREATING_USERNAME":
         await delete_msg(user_msg_id)
         if not re.match(r"^[a-zA-Z]+$", text):
-            msg = await update.message.reply_text(
-                "⚠️ يرجى كتابة الاسم بالأحرف الإنجليزية فقط.",
-                reply_markup=back_only_markup(),
-            )
-            await add_to_stack(context, msg.message_id)
+            await delete_msg(user_msg_id)
+            last_msg_id = context.user_data.get("last_msg_id")
+            if last_msg_id:
+                try:
+                    await context.bot.edit_message_text(
+                        chat_id=chat_id,
+                        message_id=last_msg_id,
+                        text=f"⚠️ يرجى كتابة الاسم بالأحرف الإنجليزية فقط.\n\n🔤 الاسم الذي أرسلته: <code>{text}</code>\nأرسل الاسم مرة أخرى:",
+                        parse_mode="HTML",
+                        reply_markup=back_only_markup(),
+                    )
+                except BadRequest as e:
+                    if "Message is not modified" not in str(e):
+                        logger.error(f"خطأ في تعديل رسالة الاسم: {e}")
             return
 
         # إذا نجح الاسم: نعدل الرسالة السابقة ونطلب الباسورد
@@ -119,8 +131,28 @@ async def account_manager_handler(update, context):
                 user_row["id"], "create", account_id=account["id"], data="إنشاء حساب"
             )
 
-            await update_live_card(context.bot, user_row["id"])
-            await post_order_to_admin_group(context.application, order)
+            # بناء نص الطلب للأدمن
+            score = calculate_user_score(user_row)
+            tier_info = get_user_tier_info(score)
+            archive_url = get_archive_link(user_row)
+            user_tg_link = f"<a href='tg://user?id={user.id}'>{user.first_name}</a>"
+
+            if archive_url:
+                account_link = f"<a href='{archive_url}'>{account['account_name']}</a>"
+            else:
+                account_link = f"<code>{account['account_name']}</code>"
+
+            admin_text = (
+                f"🆕 <b>طلب إنشاء حساب جديد (#{order['order_code']})</b>\n"
+                f"━━━━━━━━━━━━━━\n"
+                f"👤 <b>المستخدم:</b> {user_tg_link} | {tier_info['name']}\n"
+                f"🗂 <b>الحساب:</b> {account_link}\n"
+                f"📊 <b>التقييم:</b> {tier_info['stars']} ({score} نقطة)\n"
+                f"━━━━━━━━━━━━━━\n"
+                f"🔑 <b>كلمة المرور:</b> <code>{text}</code>\n"
+            )
+
+            await route_order_to_admin(context.bot, order, admin_text)
 
             # استعادة نظام الأنيميشن الأصلي بالكامل
             for step in [ANIMATION_STEP_2, ANIMATION_STEP_3, ANIMATION_STEP_4]:

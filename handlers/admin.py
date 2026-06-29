@@ -15,6 +15,7 @@ from database.repository import (
     set_account_status,
 )
 from services.generators import generate_account_name
+from services.scoring import update_live_card
 from keyboards.main import back_only_markup
 
 # --- دوال الإذاعة والتحكم ---
@@ -91,7 +92,8 @@ async def set_payment_number_command(
 async def admin_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user = update.effective_user
-    if user.id not in ADMIN_IDS:
+    from database.repository import get_admin_by_telegram_id
+    if not get_admin_by_telegram_id(user.id):
         await query.answer("⛔ ليس لديك صلاحية.", show_alert=True)
         return
 
@@ -145,7 +147,7 @@ async def admin_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = [
             [
                 InlineKeyboardButton(
-                    "✅ تم", callback_data=f"admin|confirm|{order_code}"
+                    "✅ تم", callback_data=f"admin|approve|{order_code}"
                 ),
                 InlineKeyboardButton(
                     "❌ رفض", callback_data=f"admin|reject|{order_code}"
@@ -196,7 +198,7 @@ async def admin_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = [
             [
                 InlineKeyboardButton(
-                    "✅ تم", callback_data=f"admin|confirm|{order_code}"
+                    "✅ تم", callback_data=f"admin|approve|{order_code}"
                 ),
                 InlineKeyboardButton(
                     "❌ رفض", callback_data=f"admin|reject|{order_code}"
@@ -205,7 +207,7 @@ async def admin_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         await safe_edit(updated_text, InlineKeyboardMarkup(keyboard))
 
-    elif action == "confirm":
+    elif action == "approve":
         account = get_account_by_id(order["account_id"])
         conn = get_conn()
         user_row = conn.execute(
@@ -221,18 +223,71 @@ async def admin_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except:
                 pass
         update_order_status(order_code, "completed", processed_by=user.id)
-        set_account_status(account["id"], "فعال ✅")
+        set_account_status(account["id"], "active")
+
+        # تحديث بطاقة الأرشيف فقط بعد الموافقة
+        from database.repository import get_user_by_id_helper
+        user_db = get_user_by_id_helper(order["user_id"])
+        if user_db:
+            await update_live_card(context.bot, user_db["id"])
+
         await query.answer("✅ تم")
         await safe_edit("✅ تم التنفيذ بنجاح.", None)
 
+        # تحديث مركز الاستعلامات
+        fresh_order = get_order_by_code(order_code)
+        if fresh_order and fresh_order["monitoring_msg_id"]:
+            from services.admin_router import update_monitoring_message
+            await update_monitoring_message(
+                context.bot,
+                fresh_order["monitoring_msg_id"],
+                query.message.text + f"\n\n━━━━━━━━━━━━━━\n✅ <b>الحالة:</b> منجز بواسطة {user.first_name}",
+            )
+
     elif action == "reject":
         update_order_status(order_code, "rejected", processed_by=user.id)
+
+        # حذف الحساب وإعادة الحالة للمستخدم
+        from database.repository import get_user_by_id_helper
+        user_db = get_user_by_id_helper(order["user_id"])
+        account = get_account_by_id(order["account_id"])
+
+        if account:
+            from database.repository import delete_account_by_id
+            delete_account_by_id(account["id"])
+
+        if user_db:
+            from database.repository import set_user_state as _set_state
+            _set_state(user_db["telegram_id"], "START")
+            try:
+                await context.bot.send_message(
+                    chat_id=user_db["telegram_id"],
+                    text=(
+                        "❌ <b>تم رفض طلب إنشاء حسابك.</b>\n\n"
+                        "يمكنك المحاولة مرة أخرى باسم مختلف."
+                    ),
+                    parse_mode="HTML",
+                )
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).error(f"خطأ في إرسال رفض الحساب: {e}")
+
         await query.answer("❌ تم الرفض")
         await safe_edit("❌ تم رفض الطلب.", None)
 
+        # تحديث مركز الاستعلامات
+        fresh_order = get_order_by_code(order_code)
+        if fresh_order and fresh_order["monitoring_msg_id"]:
+            from services.admin_router import update_monitoring_message
+            await update_monitoring_message(
+                context.bot,
+                fresh_order["monitoring_msg_id"],
+                query.message.text + f"\n\n━━━━━━━━━━━━━━\n❌ <b>الحالة:</b> مرفوض",
+            )
+
 
 def register_admin_handlers(app):
-    app.add_handler(CallbackQueryHandler(admin_cb, pattern=r"^adm\|"))
+    app.add_handler(CallbackQueryHandler(admin_cb, pattern=r"^admin\|"))
     app.add_handler(CallbackQueryHandler(monitoring_skip_cb, pattern=r"^mon\|skip\|"))
     app.add_handler(CommandHandler("broadcast", broadcast_command))
     app.add_handler(CommandHandler("dm", dm_command))
